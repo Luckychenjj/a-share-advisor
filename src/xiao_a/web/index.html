@@ -1,0 +1,1883 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小A顾问</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f5f6f8, #111418);
+      --panel: light-dark(#ffffff, #1a1e24);
+      --panel-2: light-dark(#f0f2f5, #232830);
+      --text: light-dark(#17191d, #f2f4f7);
+      --muted: light-dark(#68707c, #aab2be);
+      --line: light-dark(#dde1e7, #343a44);
+      --accent: light-dark(#1d4ed8, #7da2ff);
+      --accent-soft: light-dark(#e9efff, #202b47);
+      --good: light-dark(#0b7a43, #4fd195);
+      --bad: light-dark(#b42318, #ff8b81);
+      --warn: light-dark(#a15c00, #f4bc63);
+      --shadow: 0 10px 30px light-dark(rgba(24, 31, 44, .08), rgba(0, 0, 0, .25));
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    button, input { font: inherit; }
+    .shell { max-width: 1380px; margin: 0 auto; padding: 22px 26px 30px; }
+    header { display: grid; gap: 12px; margin-bottom: 20px; }
+    h1 { font-size: 26px; font-weight: 650; margin: 0; letter-spacing: -.02em; }
+    h2 { font-size: 16px; margin: 0 0 14px; font-weight: 650; }
+    .sub { color: var(--muted); margin-top: 2px; }
+    .brand { min-width: 132px; }
+    .quote-controls { display: flex; align-items: center; gap: 8px; }
+    .stock-search { position: relative; width: 100%; min-width: 0; }
+    .stock-search input { width: 100%; padding-right: 62px; }
+    .stock-search button { position: absolute; right: 4px; top: 4px; padding: 6px 9px; font-size: 12px; }
+    .search-results { position: static; z-index: 20; width: 100%; margin-top: 6px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); box-shadow: none; }
+    .search-result { display: grid; grid-template-columns: 1fr auto; gap: 10px; width: 100%; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); text-align: left; font-weight: 500; }
+    .search-result:last-child { border-bottom: 0; }
+    .search-result:hover, .search-result.active { background: var(--accent-soft); color: var(--accent); }
+    .search-result-code { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    input[type="text"], input[type="number"] { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; min-width: 0; }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button { border: 0; border-radius: 9px; padding: 10px 14px; background: var(--accent); color: light-dark(#fff, #10141c); font-weight: 650; cursor: pointer; }
+    button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+    button:disabled { opacity: .55; cursor: wait; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.38fr) minmax(390px, .92fr); gap: 18px; align-items: start; }
+    .stack { display: grid; gap: 18px; min-width: 0; }
+    #dashboardGrid.free-layout { position: relative; display: block; min-height: 720px; margin: 0 -9px; }
+    #dashboardGrid.free-layout > .free-layout-item { position: absolute; min-width: 180px; min-height: 120px; padding: 0; touch-action: none; }
+    #dashboardGrid.free-layout > .free-layout-item > .free-layout-item-content { position: relative; width: 100%; height: 100%; }
+    #dashboardGrid.free-layout > .free-layout-item.layout-dragging,
+    #dashboardGrid.free-layout > .free-layout-item.layout-resizing { z-index: 100 !important; }
+    #dashboardGrid.free-layout > .free-layout-item.layout-dragging > .free-layout-item-content,
+    #dashboardGrid.free-layout > .free-layout-item.layout-resizing > .free-layout-item-content { box-shadow: 0 0 0 3px var(--accent), 0 18px 40px color-mix(in srgb, var(--accent) 22%, transparent); opacity: .94; }
+    body:not(.layout-editing) #dashboardGrid.free-layout > .free-layout-item > .free-layout-item-content { cursor: default; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 20px; }
+    .free-layout-item .panel { height: 100%; overflow: auto; }
+    .quote-strip { width: 100%; min-width: 540px; }
+    .quote-card { display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 12px; min-height: 0; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+    .quote-card-search { min-width: 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    .quote-card-search .label { margin-bottom: 5px; }
+    .quote-card-content { display: flex; align-items: center; gap: 18px; min-width: 0; }
+    .quote-chart { padding-top: 2px; border-top: 1px solid var(--line); }
+    .chart-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 6px; }
+    .chart-tab { padding: 5px 9px; font-size: 12px; }
+    .chart-tab.active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+    .chart-range { padding: 4px 8px; font-size: 11px; }
+    .chart-range.active { background: var(--panel-2); color: var(--accent); border-color: var(--accent); }
+    .chart-zoom { width: 100px; accent-color: var(--accent); }
+    .chart-hint { color: var(--muted); font-size: 11px; }
+    .chart-collapse { padding: 5px 9px; font-size: 12px; }
+    .quote-chart.collapsed .chart-toolbar > :not(#chartToggle):not(#quoteAnalyzeBtn), .quote-chart.collapsed .chart-frame { display: none; }
+    .chart-divider { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+    .chart-meta { margin-left: auto; color: var(--muted); font-size: 11px; }
+    .chart-frame { position: relative; min-height: 250px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); overflow: hidden; }
+    .chart-frame canvas { display: block; width: 100%; height: 250px; }
+    .chart-empty { display: grid; place-items: center; min-height: 250px; color: var(--muted); }
+    .search-decision { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .search-decision-title { color: var(--muted); font-size: 12px; }
+    .search-decision-summary { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    .search-decision-action { min-width: 62px; padding: 5px 10px; border-radius: 999px; text-align: center; font-weight: 700; }
+    .search-decision-action.buy { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+    .search-decision-action.sell, .search-decision-action.reduce { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good); }
+    .search-decision-item { display: grid; gap: 1px; }
+    .search-decision-item .label { color: var(--muted); font-size: 11px; }
+    .search-decision-item .value { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .search-decision-status { grid-column: 1 / -1; color: var(--muted); font-size: 12px; line-height: 1.2; margin-top: -9px; padding-top: 0; }
+    .quote-card-main { min-width: 150px; padding-right: 16px; border-right: 1px solid var(--line); }
+    .quote-card-main-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .quote-analyze-btn { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+    .quote-card-main .value { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .quote-card-stats { display: grid; grid-template-columns: repeat(4, minmax(92px, 1fr)); flex: 1; gap: 10px 14px; }
+    .quote-card-stats .metric { min-height: 0; padding: 0; border: 0; background: transparent; }
+    .quote-card-stats .metric .value { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .quote-card-stats .metric.event-metric { grid-column: span 2; }
+    .quote-card-stats .metric.event-metric .value { font-size: 14px; line-height: 1.4; white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+    .quote-card-stats .metric.relation-metric .value { font-size: 13px; line-height: 1.35; white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .event-impact { font-size: 12px; font-weight: 700; margin-left: 3px; }
+    .event-positive { color: var(--bad); }
+    .event-negative { color: var(--good); }
+    .event-neutral { color: var(--warn); }
+    .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-height: 70px; }
+    .metric .label { color: var(--muted); font-size: 12px; }
+    .metric .value { font-size: 20px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .feature-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+    .feature-row { display: grid; grid-template-columns: 96px 1fr 42px; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+    .feature-row label { color: var(--muted); }
+    .model-input-footer { display: grid; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .model-input-footer .small-label { line-height: 1.5; }
+    .model-input-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .model-input-mode { flex: 1; min-width: 180px; }
+    .model-scenario-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 12px; font-weight: 650; white-space: nowrap; user-select: none; }
+    .model-scenario-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+    .model-input-footer button { white-space: nowrap; }
+    .model-input-footer button:disabled { cursor: not-allowed; }
+    #featureList input[type="range"]:disabled { cursor: not-allowed; opacity: .55; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    .range-value { text-align: right; font-variant-numeric: tabular-nums; }
+    .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .field input { width: 100%; }
+    .run-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+    .status { color: var(--muted); min-height: 22px; }
+    .decision { display: grid; grid-template-columns: 112px 1fr; gap: 18px; align-items: center; }
+    .action { width: 104px; height: 104px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-size: 23px; font-weight: 700; }
+    .action.buy { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); } /* A股：买入用红色 */
+    .action.sell, .action.reduce { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good); } /* A股：卖出/减仓用绿色 */
+    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .big-number { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .small-label { color: var(--muted); font-size: 12px; }
+    .track { height: 9px; border-radius: 99px; background: var(--panel-2); overflow: hidden; margin-top: 8px; }
+    .fill { height: 100%; background: var(--accent); border-radius: inherit; transition: width .25s ease; }
+    .weight-row { display: grid; grid-template-columns: 128px 1fr 48px; align-items: center; gap: 10px; margin: 11px 0; }
+    .weight-row .track { margin: 0; }
+    .strategy { padding: 12px; margin-top: 10px; border: 1px solid var(--line); border-radius: 11px; background: color-mix(in srgb, var(--panel-2) 58%, transparent); }
+    .strategy:first-of-type { margin-top: 0; }
+    .supplemental-grid { display: grid; gap: 12px; }
+    .supplemental-block { padding: 10px 0; border-top: 1px solid var(--line); }
+    .supplemental-block:first-child { border-top: 0; padding-top: 0; }
+    .supplemental-title { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-weight: 650; }
+    .supplemental-list { margin: 7px 0 0; padding-left: 18px; color: var(--muted); }
+    .supplemental-list li { margin: 4px 0; }
+    .supplemental-meta { color: var(--muted); font-size: 12px; }
+    .strategy-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .strategy-name { font-weight: 650; }
+    .pill { display: inline-flex; align-items: center; border-radius: 99px; padding: 3px 8px; background: var(--panel-2); color: var(--muted); font-size: 12px; }
+    .evidence { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+    .risk-list { margin: 0; padding-left: 18px; }
+    .risk-list li { margin: 6px 0; }
+    .module-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .module-heading h2 { margin-bottom: 0; }
+    .decision-symbol { color: var(--muted); font-size: 13px; font-weight: 500; white-space: nowrap; }
+    .account-status-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 22px; margin-top: 10px; }
+    .account-snapshot { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 12px; }
+    .account-snapshot .metric { min-height: 62px; background: var(--panel-2); }
+    .account-holdings { margin-top: 14px; }
+    .account-holdings-table { width: 100%; border-collapse: collapse; white-space: nowrap; font-size: 12px; }
+    .account-holdings-table th, .account-holdings-table td { padding: 9px 7px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+    .account-holdings-table th { color: var(--muted); font-weight: 500; }
+    .account-holdings-table th:first-child, .account-holdings-table td:first-child { text-align: left; }
+    .sort-header { display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; font-weight: inherit; white-space: nowrap; }
+    .sort-header:hover, .sort-header:focus-visible { color: var(--accent); outline: none; }
+    .account-holdings-table th:first-child .sort-header { justify-content: flex-start; }
+    .sort-indicator { min-width: 12px; color: var(--muted); font-size: 11px; line-height: 1; }
+    .sort-header.active .sort-indicator { color: var(--accent); }
+    .holding-select-cell { display: flex; align-items: center; }
+    .holding-select-btn { display: inline-flex; flex-direction: column; align-items: flex-start; min-width: 92px; padding: 5px 9px; font-size: 12px; line-height: 1.35; text-align: left; white-space: nowrap; }
+    .holding-select-btn .holding-select-state { color: var(--muted); font-size: 11px; }
+    .holding-select-btn .holding-select-symbol { color: var(--muted); font-size: 11px; }
+    .holding-select-btn.selected { background: var(--good); color: #fff; }
+    .holding-select-btn.selected .holding-select-state, .holding-select-btn.selected .holding-select-symbol { color: #fff; opacity: .9; }
+    .danger { color: var(--bad); }
+    .warning { color: var(--warn); }
+    .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+    .footnote { color: var(--muted); font-size: 12px; margin-top: 14px; }
+    .invalidation-state { margin-left: 6px; font-weight: 700; white-space: nowrap; }
+    .invalidation-state.valid { color: var(--good); }
+    .invalidation-state.invalid { color: var(--bad); }
+    .invalidation-state.unknown { color: var(--warn); }
+    .invalidation-details { margin: 7px 0 0; padding-left: 18px; font-size: 12px; }
+    .invalidation-details li { margin: 4px 0; }
+    .invalidation-factor { color: var(--bad); font-weight: 700; }
+    .invalidation-note { color: var(--muted); }
+    .portfolio-panel { margin-top: 16px; }
+    .layout-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; }
+    .layout-toolbar .layout-status { margin-left: auto; }
+    .layout-item { position: relative; min-width: 0; }
+    .layout-drag-handle, .layout-lock-handle { display: none; position: absolute; z-index: 4; }
+    .layout-drag-handle { top: 8px; left: 50%; right: auto; min-width: 72px; transform: translateX(-50%); padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: grab; font-size: 12px; line-height: 1.2; touch-action: none; user-select: none; }
+    .layout-lock-handle { top: 8px; right: 48px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1.35; }
+    .layout-lock-handle.locked { color: var(--accent); border-color: var(--accent); }
+    body.layout-editing .layout-item { outline: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; }
+    body.layout-editing .layout-drag-handle, body.layout-editing .layout-lock-handle { display: block; }
+    body.layout-editing .layout-drag-handle { z-index: 8; }
+    body.layout-editing .layout-drag-handle:active { cursor: grabbing; }
+    .holding-editor { display: grid; gap: 8px; }
+    .holding-row { display: grid; grid-template-columns: 1.2fr .8fr .9fr 42px; gap: 8px; align-items: end; }
+    .holding-head { color: var(--muted); font-size: 12px; align-items: center; }
+    .holding-row input { width: 100%; }
+    .remove-btn { padding: 9px; background: var(--panel-2); color: var(--bad); border: 1px solid var(--line); }
+    .portfolio-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    .portfolio-controls .field { width: 150px; }
+    .trade-panel { margin-top: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+    .trade-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .trade-controls .field { width: 135px; }
+    .trade-controls .field.wide { width: 170px; }
+    .trade-preview { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .trade-history { margin-top: 12px; max-height: 180px; overflow: auto; font-size: 12px; }
+    .trade-history table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+    .trade-history td, .trade-history th { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; }
+    .trade-history th:first-child, .trade-history td:first-child { text-align: left; }
+    .portfolio-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 18px 0 12px; }
+    .portfolio-summary .metric { min-height: 78px; background: var(--panel-2); }
+    .table-wrap { overflow-x: auto; }
+    .portfolio-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+    .portfolio-table th, .portfolio-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+    .portfolio-table th { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .portfolio-table th:first-child, .portfolio-table td:first-child { text-align: left; }
+.screener-panel { display: flex; flex-direction: column; }
+.screener-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin: 14px 0 10px; }
+.screener-controls .field { width: 150px; }
+.screener-status { min-height: 22px; color: var(--muted); }
+.screener-summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 10px; color: var(--muted); font-size: 12px; }
+.screener-summary span { padding: 3px 8px; border-radius: 99px; background: var(--panel-2); }
+.screener-table { width: 100%; border-collapse: collapse; min-width: 910px; font-size: 12px; }
+.screener-table th, .screener-table td { padding: 9px 7px; border-bottom: 1px solid var(--line); text-align: right; vertical-align: top; font-variant-numeric: tabular-nums; }
+.screener-table th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+.screener-table th:nth-child(2), .screener-table td:nth-child(2), .screener-table th:nth-child(8), .screener-table td:nth-child(8) { text-align: left; }
+.screener-stock { font-weight: 650; white-space: nowrap; }
+.screener-basis { max-width: 330px; color: var(--muted); line-height: 1.45; }
+.screener-action { display: inline-flex; padding: 3px 8px; border-radius: 99px; font-weight: 650; }
+.screener-action.buy { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.screener-action.hold { background: var(--accent-soft); color: var(--accent); }
+.screener-analyze-btn { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+.positive { color: var(--bad); } /* A股：盈利/上涨用红色 */
+.negative { color: var(--good); } /* A股：亏损/下跌用绿色 */
+    @media (max-width: 820px) {
+      .shell { padding: 14px; }
+      header { align-items: stretch; }
+      .stock-search { width: 100%; }
+      .quote-strip { min-width: 0; width: 100%; }
+      .grid { grid-template-columns: 1fr; }
+      .layout-toolbar { margin-top: 4px; }
+      .quote-card { gap: 10px; }
+      .quote-card-search { padding-bottom: 8px; }
+      .quote-card-content { align-items: stretch; flex-direction: column; gap: 10px; }
+      .quote-card-main { padding-right: 0; }
+      .search-decision { grid-template-columns: 1fr; gap: 7px; }
+      .quote-card-stats { gap: 10px; }
+      .portfolio-summary { grid-template-columns: repeat(2, 1fr); }
+      .account-snapshot { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 500px) {
+      .decision { grid-template-columns: 1fr; }
+      .action { width: 92px; height: 92px; }
+      .summary-grid { grid-template-columns: 1fr; }
+      .risk-grid { grid-template-columns: 1fr; }
+      .feature-list { grid-template-columns: 1fr; }
+      .feature-row { grid-template-columns: 98px 1fr 38px; }
+      .holding-row { grid-template-columns: 1fr 1fr 1fr 38px; }
+      .quote-card-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .quote-card-stats .metric.event-metric { grid-column: span 2; }
+      .portfolio-summary { grid-template-columns: 1fr; }
+      .account-snapshot { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <h1>小A顾问</h1>
+        <div class="sub">证据优先 · 模型可替换 · 风控独立</div>
+      </div>
+      <section id="quoteStrip" class="quote-strip" aria-live="polite">
+        <div class="quote-card">
+          <div class="quote-card-search">
+            <div class="label">搜索个股</div>
+            <div class="quote-controls stock-search">
+              <input id="symbol" type="text" value="300750" aria-label="搜索股票" autocomplete="off" placeholder="名称、代码或拼音首字母">
+              <button id="quoteBtn" class="secondary" type="button">查询</button>
+            </div>
+            <div id="searchResults" class="search-results" role="listbox" aria-label="股票搜索结果" hidden></div>
+          </div>
+          <div class="quote-card-content">
+            <div class="quote-card-main">
+              <div class="label">当前个股</div>
+              <div class="value" id="qName">尚未读取</div>
+            </div>
+            <div class="quote-card-stats">
+              <div class="metric"><div class="label">总市值</div><div class="value" id="qMarketCap">—</div></div>
+              <div class="metric"><div class="label">流通市值</div><div class="value" id="qFloatMarketCap">—</div></div>
+              <div class="metric"><div class="label">现价</div><div class="value" id="qPrice">—</div></div>
+              <div class="metric"><div class="label">涨跌幅</div><div class="value" id="qChange">—</div></div>
+              <div class="metric"><div class="label">成交额</div><div class="value" id="qAmount">—</div></div>
+              <div class="metric"><div class="label">成交量</div><div class="value" id="qVolume">—</div></div>
+              <div class="metric"><div class="label">换手率</div><div class="value" id="qTurnover">—</div></div>
+              <div class="metric"><div class="label">量比</div><div class="value" id="qVolumeRatio">—</div></div>
+              <div class="metric"><div class="label">市盈静态</div><div class="value" id="qPeStatic">—</div></div>
+              <div class="metric"><div class="label">市盈动态</div><div class="value" id="qPeDynamic">—</div></div>
+              <div class="metric"><div class="label">市盈TTM</div><div class="value" id="qPeTtm">—</div></div>
+              <div class="metric"><div class="label">市净率</div><div class="value" id="qPb">—</div></div>
+              <div class="metric event-metric"><div class="label">3个月内大宗事件</div><div class="value" id="qReduction">—</div></div>
+              <div class="metric relation-metric"><div class="label">量价关系与建议</div><div class="value" id="qVolumeRelation">—</div></div>
+              <div class="metric"><div class="label">数据质量</div><div class="value" id="qStatus">—</div></div>
+            </div>
+          </div>
+          <div id="quoteChart" class="quote-chart">
+            <div class="chart-toolbar">
+              <button id="chartToggle" type="button" class="secondary chart-collapse">收起图表</button>
+              <button id="quoteAnalyzeBtn" class="secondary quote-analyze-btn" type="button" disabled>分析判断</button>
+              <button type="button" class="secondary chart-tab active" data-chart-period="intraday">分时</button>
+              <button type="button" class="secondary chart-tab" data-chart-period="daily">日K</button>
+              <button type="button" class="secondary chart-tab" data-chart-period="weekly">周K</button>
+              <button type="button" class="secondary chart-tab" data-chart-period="monthly">月K</button>
+              <span class="chart-divider"></span>
+              <label class="chart-hint" for="chartZoom">自由缩放</label>
+              <input id="chartZoom" class="chart-zoom" type="range" min="20" max="240" step="1" value="90" aria-label="自由缩放日期范围">
+              <span id="chartZoomLabel" class="chart-hint">90根</span>
+              <span class="chart-hint">滚轮缩放 · 拖动查看</span>
+              <span id="chartMeta" class="chart-meta">等待行情数据</span>
+            </div>
+            <div id="chartFrame" class="chart-frame"><div class="chart-empty">搜索股票后加载分时与K线</div></div>
+          </div>
+          <div id="searchDecision" class="search-decision" hidden>
+            <div class="search-decision-title">所搜索个股模型判断</div>
+            <div class="search-decision-summary">
+              <span id="qDecisionAction" class="search-decision-action">—</span>
+              <span class="search-decision-item"><span class="label">综合分数</span><span id="qDecisionScore" class="value">—</span></span>
+              <span class="search-decision-item"><span class="label">规则符合分</span><span id="qDecisionConfidence" class="value">—</span></span>
+              <span class="search-decision-item"><span class="label">可执行</span><span id="qDecisionExecutable" class="value">—</span></span>
+            </div>
+          </div>
+          <div id="searchDecisionStatus" class="search-decision-status" aria-live="polite">等待搜索个股分析</div>
+        </div>
+      </section>
+    </header>
+
+    <div class="layout-toolbar">
+      <span class="small-label">中间模块布局</span>
+      <button id="layoutEditBtn" class="secondary" type="button">调整布局</button>
+      <button id="layoutSaveBtn" class="secondary" type="button" onclick="saveLayoutSnapshot()">设为默认布局</button>
+      <button id="layoutResetBtn" class="secondary" type="button">恢复默认布局</button>
+      <span id="layoutStatus" class="layout-status small-label" aria-live="polite"></span>
+    </div>
+
+    <div id="dashboardGrid" class="grid">
+      <div class="stack">
+        <section class="panel layout-item" data-layout-id="account" data-default-col="1" data-default-row="1" data-default-col-span="8" data-default-row-span="5">
+          <div class="module-heading">
+            <h2>我的账户</h2>
+            <button id="syncRiskBtn" class="secondary" type="button">自动读取持仓与现金</button>
+          </div>
+          <div id="accountSnapshot" class="account-snapshot" hidden></div>
+          <div id="accountHoldingsTable" class="account-holdings table-wrap"></div>
+          <div class="account-status-row">
+            <span id="riskSyncStatus" class="status" aria-live="polite"></span>
+            <span id="status" class="status" aria-live="polite"></span>
+          </div>
+          <div class="footnote">总仓位=持仓市值÷总资产，由已保存持仓和最新行情自动计算；单股集中度仍在持仓表中单独风控。未接入券商交易接口，不代表自动交易。</div>
+        </section>
+        <section class="panel layout-item" data-layout-id="model-input" data-default-col="9" data-default-row="1" data-default-col-span="4" data-default-row-span="6">
+          <div class="module-heading">
+            <h2>模型输入</h2>
+          </div>
+          <div id="featureList" class="feature-list"></div>
+          <div class="model-input-footer">
+            <div class="model-input-actions">
+              <span id="modelInputMode" class="small-label model-input-mode">实时数据模式 · 滑杆只读</span>
+              <label class="model-scenario-toggle"><input id="scenarioModeToggle" type="checkbox" role="switch"> 参数推演</label>
+              <button id="runBtn" class="secondary" type="button" disabled>按当前参数重算</button>
+            </div>
+            <span class="small-label">默认使用实时数据：选中持仓或搜索个股后，系统会读取行情、趋势和量价等信息并自动分析，模型输入每 5 分钟更新一次。</span>
+            <span class="small-label">开启“参数推演”后才可手动调整滑杆；手动输入仅用于情景推演，并非实时数据，自动模型更新将暂停。</span>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel layout-item" data-layout-id="decision" data-default-col="9" data-default-row="7" data-default-col-span="4" data-default-row-span="3">
+          <div class="module-heading">
+            <h2>最终判断</h2>
+            <span id="decisionSymbol" class="decision-symbol">尚未选择股票</span>
+          </div>
+          <div id="decisionEmpty" class="empty">调整输入后运行综合判断</div>
+          <div id="decisionView" class="decision" hidden>
+            <div id="action" class="action">—</div>
+            <div>
+              <div class="summary-grid">
+                <div><div class="small-label">综合分数</div><div id="score" class="big-number">—</div></div>
+                <div><div class="small-label">规则符合分</div><div id="confidence" class="big-number">—</div></div>
+                <div><div class="small-label">可执行</div><div id="executable" class="big-number">—</div></div>
+              </div>
+              <div class="track" role="progressbar" aria-label="规则符合分"><div id="confidenceFill" class="fill"></div></div>
+            </div>
+          </div>
+        </section>
+        <section class="panel layout-item" data-layout-id="weights" data-default-col="1" data-default-row="6" data-default-col-span="4" data-default-row-span="3">
+          <h2>模型权重</h2>
+          <div id="weights" class="empty">尚无结果</div>
+        </section>
+        <section class="panel layout-item" data-layout-id="evidence" data-default-col="5" data-default-row="6" data-default-col-span="8" data-default-row-span="8">
+          <div class="module-heading">
+            <h2>证据与风险条件</h2>
+            <span id="evidenceSymbol" class="decision-symbol">尚未选择股票</span>
+          </div>
+          <div id="strategies" class="empty">尚无结果</div>
+        </section>
+        <section class="panel layout-item" data-layout-id="supplemental" data-default-col="1" data-default-row="9" data-default-col-span="4" data-default-row-span="4">
+          <h2>公告、资金流与涨停池</h2>
+          <div id="supplemental" class="empty">尚无结果</div>
+        </section>
+        <section class="panel layout-item" data-layout-id="risk" data-default-col="9" data-default-row="10" data-default-col-span="4" data-default-row-span="3">
+          <h2>风险覆盖</h2>
+          <div id="risks" class="empty">尚无警告或否决</div>
+        </section>
+        <section class="panel layout-item screener-panel" data-layout-id="market-screener" data-default-col="1" data-default-row="14" data-default-col-span="12" data-default-row-span="5">
+          <div class="module-heading">
+            <h2>全市场筛选</h2>
+            <button id="runScreenerBtn" type="button">开始筛选</button>
+          </div>
+          <div class="screener-controls">
+            <div class="field"><label for="screenerAmount">最低日成交额（亿元）</label><input id="screenerAmount" type="number" min="0.1" max="20" step="0.1" value="0.5"></div>
+            <div class="field"><label for="screenerLimit">展示数量</label><input id="screenerLimit" type="number" min="5" max="30" step="5" value="20"></div>
+            <span class="small-label">手动触发；不会影响持仓与搜索个股的实时刷新</span>
+          </div>
+          <div id="screenerStatus" class="screener-status" aria-live="polite">尚未运行。点击“开始筛选”后按当前全市场快照筛选。</div>
+          <div id="screenerSummary" class="screener-summary" hidden></div>
+          <div id="screenerTable" class="table-wrap"><div class="empty">结果将按现有模型综合分与规则符合分排序展示；规则符合分不是成功概率。</div></div>
+          <div class="footnote">筛选分两步：先过滤ST、退市、低价和低流动性股票，再对少量候选运行趋势、情绪、缠论与多因子模型。全市场阶段不逐股拉取公告和资金流，点“详细分析”可补齐。</div>
+        </section>
+      </div>
+    </div>
+
+    <section class="panel portfolio-panel">
+      <h2>我的持仓</h2>
+      <div class="holding-row holding-head" aria-hidden="true"><span>股票代码</span><span>持股数量</span><span>成本价（可空）</span><span></span></div>
+      <div id="holdingEditor" class="holding-editor"></div>
+      <div class="portfolio-controls">
+        <button id="addHoldingBtn" class="secondary" type="button">添加持仓</button>
+        <div class="field"><label for="portfolioCash">账户现金（元）</label><input id="portfolioCash" type="number" min="0" step="100" value="247.77"></div>
+        <button id="portfolioBtn" type="button">分析全部持仓</button>
+        <span id="portfolioStatus" class="status" aria-live="polite"></span>
+      </div>
+      <div class="trade-panel">
+        <div class="module-heading"><h3>交易录入</h3><span class="small-label">佣金最低按5元；卖出印花税0.05%；过户费0.001%</span></div>
+        <div class="trade-controls">
+          <div class="field"><label for="tradeSide">方向</label><select id="tradeSide"><option value="buy">买入</option><option value="sell">卖出</option></select></div>
+          <div class="field wide"><label for="tradeSymbol">股票代码</label><input id="tradeSymbol" type="text" placeholder="如 300750"></div>
+          <div class="field"><label for="tradeQuantity">数量</label><input id="tradeQuantity" type="number" min="100" step="100" value="100"></div>
+          <div class="field"><label for="tradePrice">成交单价</label><input id="tradePrice" type="number" min="0.01" step="0.01" placeholder="成交价"></div>
+          <div class="field"><label for="tradeCommissionRate">佣金比例（%）</label><input id="tradeCommissionRate" type="number" min="0" step="0.001" value="0.03"></div>
+          <button id="executeTradeBtn" type="button">确认交易</button>
+        </div>
+        <div id="tradePreview" class="trade-preview">输入交易参数后自动计算费用和现金变化。</div>
+        <div id="tradeHistory" class="trade-history"></div>
+      </div>
+      <div id="portfolioSummary" class="portfolio-summary" hidden></div>
+      <div id="portfolioTable" class="table-wrap"></div>
+      <div id="portfolioWarnings"></div>
+      <div class="footnote">按此前最新记录预填，请先核对数量并补充成本价。持仓数量、成本和现金由本机服务统一保存，普通浏览器与 GPT 浏览器会自动同步。</div>
+    </section>
+  </main>
+
+  <script src="/assets/interact.min.js"></script>
+  <script>
+    // Keep offline information visible across all existing feature modules.
+    const runtimeNotice = document.createElement("div");
+    runtimeNotice.setAttribute("role", "status");
+    runtimeNotice.id = "runtimeNotice";
+    runtimeNotice.style.cssText = "padding:12px 20px;background:#243047;color:#fff;position:sticky;top:0;z-index:200";
+    runtimeNotice.textContent = "正在检查服务连接…";
+    document.body.prepend(runtimeNotice);
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if ((response.headers.get("content-type") || "").includes("application/json")) {
+        try {
+          const data = await response.clone().json();
+          if (data.offline) {
+            runtimeNotice.textContent = `当前显示离线缓存（${data.cached_at || "时间未知"}），仅供查看，不能据此执行交易。`;
+            runtimeNotice.style.background = "#783d15";
+          }
+        } catch {}
+      }
+      return response;
+    };
+    originalFetch("/api/runtime").then(response => response.json()).then(data => {
+      runtimeNotice.textContent = data.cloud_configured ? "混合模式 · 分析优先连接服务器 · 账户保存在本机" : "本地模式 · 账户保存在本机 · 云端尚未配置";
+    }).catch(() => { runtimeNotice.textContent = "服务暂时不可用，请检查连接"; });
+    const featureDefs = [
+      ["monthly_trend", "月线趋势", 0.5], ["weekly_trend", "周线趋势", 0.7],
+      ["daily_trend", "日线趋势", 0.4], ["relative_strength", "相对强度", 0.6],
+      ["cycle_position", "周期位置", 0.2], ["leader_strength", "龙头强度", 0.4],
+      ["sector_heat", "板块热度", 0.5], ["limit_up_breadth", "市场广度", 0.2],
+      ["emotion_cycle", "市场情绪", 0.1], ["broken_board_risk", "炸板风险", 0.3],
+      ["liquidity_quality", "流动性", 0.8], ["fund_flow_signal", "主力资金", 0.0],
+      ["limit_up_signal", "涨停池状态", 0.0]
+    ];
+    const featureList = document.getElementById("featureList");
+    let scenarioMode = false;
+    featureDefs.forEach(([key, label, value]) => {
+      const row = document.createElement("div");
+      row.className = "feature-row";
+      row.innerHTML = `<label for="f-${key}">${label}</label><input id="f-${key}" type="range" min="-1" max="1" step="0.05" value="${value}"><span id="v-${key}" class="range-value">${Number(value).toFixed(2)}</span>`;
+      featureList.appendChild(row);
+      row.querySelector("input").addEventListener("input", e => document.getElementById(`v-${key}`).textContent = Number(e.target.value).toFixed(2));
+    });
+
+    function setScenarioMode(enabled) {
+      scenarioMode = Boolean(enabled);
+      document.getElementById("scenarioModeToggle").checked = scenarioMode;
+      featureDefs.forEach(([key]) => { document.getElementById(`f-${key}`).disabled = !scenarioMode; });
+      document.getElementById("runBtn").disabled = !scenarioMode;
+      document.getElementById("modelInputMode").textContent = scenarioMode
+        ? "参数推演模式 · 已暂停自动更新"
+        : "实时数据模式 · 每 5 分钟自动更新 · 滑杆只读";
+    }
+
+    function useRealtimeModelInputs() {
+      if (scenarioMode) setScenarioMode(false);
+    }
+
+    setScenarioMode(false);
+
+    const actionLabels = { buy: "买入", hold: "观察", reduce: "减仓", sell: "卖出" };
+    const strategyLabels = { cycle_trend: "周期 × 趋势", leader_sentiment: "龙头 × 情绪", chan_structure: "缠论结构", multi_factor: "多因子评分", market_regime: "市场状态" };
+    const escapeHtml = value => String(value).replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
+    const fmtAmount = value => value == null ? "—" : value >= 1e8 ? `${(value / 1e8).toFixed(2)}亿` : `${(value / 1e4).toFixed(0)}万`;
+    const fmtVolume = value => value == null ? "—" : value >= 1e4 ? `${(value / 1e4).toFixed(1)}万手` : `${Number(value).toFixed(0)}手`;
+    const fmtVolumeRatio = value => value == null ? "—" : `${Number(value).toFixed(2)}x`;
+    const fmtTurnover = value => value == null ? "—" : `${Number(value).toFixed(2)}%`;
+    const fmtPercent = value => value == null ? "—" : `${value >= 0 ? "+" : ""}${(Number(value) * 100).toFixed(2)}%`;
+    const fmtMoney = value => value == null ? "—" : Number(value).toLocaleString("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    let latestQuote = null;
+    let detailedAnalysisSymbol = document.getElementById("symbol").value.trim();
+    let searchMatches = [];
+    let searchQuery = "";
+    let activeSearchIndex = -1;
+    let searchRequestId = 0;
+    let searchDebounceTimer = null;
+    let chartData = null;
+    let latestVolumeRelation = "—";
+    let chartPeriod = "intraday";
+    let chartRange = 90;
+    let chartOffset = 0;
+    let chartSymbol = "";
+    const defaultHoldings = [
+      {symbol: "300059", quantity: 100, average_cost: ""},
+      {symbol: "300750", quantity: 100, average_cost: ""},
+      {symbol: "300408", quantity: 100, average_cost: ""},
+      {symbol: "002129", quantity: 200, average_cost: ""}
+    ];
+    const cloneHoldings = items => (Array.isArray(items) ? items : defaultHoldings).map(item => ({
+      symbol: String(item.symbol || ""),
+      quantity: Number(item.quantity) || 0,
+      average_cost: item.average_cost == null ? "" : item.average_cost
+    }));
+    function readLocalPortfolio() {
+      try {
+        return {
+          holdings: cloneHoldings(JSON.parse(localStorage.getItem("xiao-a-holdings")) || defaultHoldings),
+          cash: Number(localStorage.getItem("xiao-a-cash")) || 247.77
+        };
+      } catch { return {holdings: cloneHoldings(defaultHoldings), cash: 247.77}; }
+    }
+    let holdings = readLocalPortfolio().holdings;
+    let portfolioVersion = null;
+    let portfolioSaveTimer = null;
+    let portfolioLastEditAt = 0;
+    let portfolioAnalysisVisible = false;
+    let liveRefreshInFlight = false;
+    let latestLivePortfolio = null;
+    let autoAnalysisInFlight = false;
+    let lastAutoAnalysisAt = 0;
+    let lastAutoAnalysisSymbol = "";
+    const realtimeModelRefreshInterval = 5 * 60 * 1000;
+    const selectedHoldingSymbols = new Set();
+    let accountSort = {key: "", direction: "desc"};
+    let riskState = {
+      total_position_pct: 0,
+      position_pct: 0,
+      daily_amount: null,
+      cash_available: null
+    };
+
+    function currentPortfolioPayload() {
+      return {
+        holdings: cloneHoldings(holdings),
+        cash: Number(document.getElementById("portfolioCash").value) || 0
+      };
+    }
+
+    function applyPortfolioState(state) {
+      holdings = cloneHoldings(state.holdings);
+      document.getElementById("portfolioCash").value = Number(state.cash) || 0;
+      localStorage.setItem("xiao-a-holdings", JSON.stringify(holdings));
+      localStorage.setItem("xiao-a-cash", document.getElementById("portfolioCash").value);
+      renderHoldingEditor();
+      renderTradeHistory(state.transactions || []);
+    }
+
+    function tradeInputs() {
+      const side = document.getElementById("tradeSide").value;
+      const symbol = document.getElementById("tradeSymbol").value.trim();
+      const quantity = Number(document.getElementById("tradeQuantity").value) || 0;
+      const price = Number(document.getElementById("tradePrice").value) || 0;
+      const commissionRate = (Number(document.getElementById("tradeCommissionRate").value) || 0) / 100;
+      const amount = quantity * price;
+      const commission = amount > 0 ? Math.max(amount * commissionRate, 5) : 0;
+      const stampTax = side === "sell" ? amount * 0.0005 : 0;
+      const transferFee = amount * 0.00001;
+      return {side, symbol, quantity, price, commissionRate, amount, commission, stampTax, transferFee, totalFee: commission + stampTax + transferFee};
+    }
+
+    function updateTradePreview() {
+      const input = tradeInputs();
+      const preview = document.getElementById("tradePreview");
+      if (!input.symbol || input.quantity <= 0 || input.price <= 0) {
+        preview.textContent = "输入交易参数后自动计算费用和现金变化。";
+        return;
+      }
+      const cashDelta = input.side === "buy" ? -(input.amount + input.totalFee) : input.amount - input.totalFee;
+      preview.textContent = `${input.side === "buy" ? "买入" : "卖出"}金额 ${fmtMoney(input.amount)} · 佣金 ${fmtMoney(input.commission)} · 印花税 ${fmtMoney(input.stampTax)} · 过户费 ${fmtMoney(input.transferFee)} · 总费用 ${fmtMoney(input.totalFee)} · 现金${cashDelta >= 0 ? "增加" : "减少"} ${fmtMoney(Math.abs(cashDelta))}`;
+    }
+
+    function renderTradeHistory(items) {
+      const box = document.getElementById("tradeHistory");
+      if (!box) return;
+      const rows = (Array.isArray(items) ? items : []).slice(-10).reverse();
+      if (!rows.length) { box.innerHTML = `<div class="small-label">暂无交易记录</div>`; return; }
+      box.innerHTML = `<table><thead><tr><th>时间</th><th>方向</th><th>股票</th><th>数量</th><th>单价</th><th>费用</th><th>已实现盈亏</th></tr></thead><tbody>${rows.map(item => `<tr><td>${escapeHtml(String(item.time || "").replace("T", " ").slice(0, 16))}</td><td class="${item.side === "buy" ? "positive" : "negative"}">${item.side === "buy" ? "买入" : "卖出"}</td><td>${escapeHtml(item.symbol || "")}</td><td>${item.quantity || 0}</td><td>${fmtMoney(item.price)}</td><td>${fmtMoney(item.total_fee)}</td><td>${item.realized_profit == null ? "—" : fmtMoney(item.realized_profit)}</td></tr>`).join("")}</tbody></table>`;
+    }
+
+    async function executeTrade() {
+      const input = tradeInputs();
+      const status = document.getElementById("portfolioStatus");
+      if (!input.symbol || input.quantity <= 0 || input.price <= 0) { status.textContent = "请填写股票代码、数量和成交单价"; return; }
+      const button = document.getElementById("executeTradeBtn");
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/trade", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+          symbol: input.symbol, side: input.side, quantity: input.quantity, price: input.price,
+          commission_rate: input.commissionRate
+        })});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "交易处理失败");
+        portfolioVersion = data.state.version;
+        applyPortfolioState(data.state);
+        status.textContent = `${input.side === "buy" ? "买入" : "卖出"}已记录，费用${fmtMoney(data.transaction.total_fee)}`;
+        updateTradePreview();
+        await analyzePortfolio({persist: false, silent: true, syncRisk: true});
+      } catch (error) { status.textContent = error.message; }
+      finally { button.disabled = false; }
+    }
+
+    async function persistPortfolioState() {
+      const response = await fetch("/api/portfolio-state", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(currentPortfolioPayload())
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "持仓同步失败");
+      if (data.state) portfolioVersion = data.state.version;
+      return data.state;
+    }
+
+    function saveHoldings() {
+      const local = currentPortfolioPayload();
+      localStorage.setItem("xiao-a-holdings", JSON.stringify(local.holdings));
+      localStorage.setItem("xiao-a-cash", String(local.cash));
+      portfolioLastEditAt = Date.now();
+      clearTimeout(portfolioSaveTimer);
+      portfolioSaveTimer = setTimeout(async () => {
+        portfolioSaveTimer = null;
+        try { await persistPortfolioState(); }
+        catch (error) { document.getElementById("portfolioStatus").textContent = error.message; }
+      }, 350);
+    }
+
+    async function syncPortfolioState() {
+      if (portfolioSaveTimer || Date.now() - portfolioLastEditAt < 1000) return;
+      try {
+        const response = await fetch("/api/portfolio-state", {cache: "no-store"});
+        const data = await response.json();
+        const state = data.state;
+        if (!state || state.version === portfolioVersion) return;
+        const shouldReanalyze = portfolioAnalysisVisible;
+        portfolioVersion = state.version;
+        applyPortfolioState(state);
+        if (shouldReanalyze) analyzePortfolio({persist: false, silent: true, syncRisk: true});
+      } catch { /* 保留当前页面数据，下一轮继续同步 */ }
+    }
+
+    function renderHoldingEditor() {
+      const editor = document.getElementById("holdingEditor");
+      editor.innerHTML = holdings.map((item, index) => `
+        <div class="holding-row">
+          <input type="text" aria-label="第${index + 1}只股票代码" data-field="symbol" data-index="${index}" value="${escapeHtml(item.symbol)}" placeholder="如 300750">
+          <input type="number" aria-label="第${index + 1}只持股数量" data-field="quantity" data-index="${index}" min="0" step="100" value="${Number(item.quantity) || 0}">
+          <input type="number" aria-label="第${index + 1}只成本价" data-field="average_cost" data-index="${index}" min="0" step="0.01" value="${item.average_cost ?? ""}" placeholder="可不填">
+          <button type="button" class="remove-btn" data-remove="${index}" aria-label="删除第${index + 1}只持仓">×</button>
+        </div>`).join("");
+      editor.querySelectorAll("input").forEach(input => input.addEventListener("input", event => {
+        const index = Number(event.target.dataset.index);
+        holdings[index][event.target.dataset.field] = event.target.value;
+        saveHoldings();
+      }));
+      editor.querySelectorAll("button[data-remove]").forEach(button => button.addEventListener("click", event => {
+        holdings.splice(Number(event.currentTarget.dataset.remove), 1);
+        saveHoldings();
+        renderHoldingEditor();
+      }));
+    }
+
+    function renderQuote(q, extras = {}) {
+      if (!q) return;
+      latestQuote = q;
+      const change = q.previous_close ? (q.price / q.previous_close - 1) * 100 : 0;
+      document.getElementById("qName").textContent = `${q.name} ${q.symbol}`;
+      document.getElementById("qPrice").textContent = Number(q.price).toFixed(2);
+      document.getElementById("qChange").textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+    document.getElementById("qChange").style.color = change >= 0 ? "var(--bad)" : "var(--good)";
+      document.getElementById("qAmount").textContent = fmtAmount(q.amount);
+      document.getElementById("qVolume").textContent = fmtVolume(q.volume);
+      if (Object.prototype.hasOwnProperty.call(extras, "volume_ratio")) document.getElementById("qVolumeRatio").textContent = fmtVolumeRatio(extras.volume_ratio);
+      if (Object.prototype.hasOwnProperty.call(extras, "turnover_pct")) document.getElementById("qTurnover").textContent = fmtTurnover(extras.turnover_pct);
+      if (Object.prototype.hasOwnProperty.call(extras, "volume_relation")) {
+        const relation = extras.volume_relation || "—";
+        latestVolumeRelation = relation;
+        updateVolumeAdvice(relation, q);
+      }
+      const valuation = key => extras[key] ?? q[key];
+      const updateValuation = (id, key, formatter) => {
+        if (Object.prototype.hasOwnProperty.call(extras, key) || q[key] != null) document.getElementById(id).textContent = formatter(valuation(key));
+      };
+      updateValuation("qMarketCap", "market_cap", fmtAmount);
+      updateValuation("qFloatMarketCap", "float_market_cap", fmtAmount);
+      updateValuation("qPeStatic", "pe_static", fmtValuation);
+      updateValuation("qPeDynamic", "pe_dynamic", fmtValuation);
+      updateValuation("qPeTtm", "pe_ttm", fmtValuation);
+      updateValuation("qPb", "pb", fmtValuation);
+      if (Object.prototype.hasOwnProperty.call(extras, "reduction_status")) {
+        const eventEl = document.getElementById("qReduction");
+        const eventSummary = extras.reduction_status || "待读取";
+        eventEl.innerHTML = eventSummary;
+        eventEl.title = extras.reduction_events || eventSummary;
+      }
+      document.getElementById("qStatus").textContent = q.status === "fresh" ? "新鲜" : q.status;
+      document.getElementById("quoteAnalyzeBtn").disabled = false;
+    }
+
+    function fmtValuation(value) {
+      return value == null || !Number.isFinite(Number(value)) || Number(value) < 0 ? "—" : Number(value).toFixed(2);
+    }
+
+    function updateVolumeAdvice(relation = latestVolumeRelation, quote = latestQuote) {
+      const relationEl = document.getElementById("qVolumeRelation");
+      if (!relationEl) return;
+      if (!relation || relation === "—") {
+        relationEl.textContent = "—";
+        relationEl.title = "量价数据不足，暂无法给出建议";
+        return;
+      }
+      const bars = chartData?.daily || [];
+      const price = Number(quote?.price);
+      const recent = bars.slice(-60).map(item => Number(item.close)).filter(Number.isFinite);
+      const high = recent.length ? Math.max(...recent) : price;
+      const low = recent.length ? Math.min(...recent) : price;
+      const position = high > low && Number.isFinite(price) ? (price - low) / (high - low) : 0.5;
+      let advice = "先观察，等待量价进一步确认";
+      if (relation === "放量上涨") advice = position >= 0.75 ? "高位放量，警惕分歧，不追高" : position <= 0.35 ? "低位放量，可能启动，回踩不破再考虑" : "趋势偏强，持有观察，不宜追涨";
+      else if (relation === "缩量上涨") advice = position >= 0.75 ? "高位缩量，动能不足，持有观察" : "上涨确认不足，等待后续放量";
+      else if (relation === "放量下跌") advice = position >= 0.65 ? "高位放量转弱，优先减仓控风险" : "低位放量杀跌，先观望，不急于接飞刀";
+      else if (relation === "缩量下跌") advice = "抛压暂缓，观察支撑，不急于追卖";
+      else if (relation === "量平价升") advice = "温和上涨，持有观察，等待放量确认";
+      else if (relation === "量平价跌") advice = "弱势整理，等待止跌信号";
+      relationEl.textContent = `${relation} · ${advice}`;
+      relationEl.title = `近60根日K位置：${Math.round(position * 100)}%；${advice}`;
+      relationEl.style.color = relation.includes("上涨") ? "var(--bad)" : relation.includes("下跌") ? "var(--good)" : "";
+    }
+
+    function reductionStatus(supplemental) {
+      const announcements = supplemental?.announcements;
+      if (!announcements || announcements.available === false) return "待读取";
+      const now = Date.now();
+      const keywords = /增持|减持|减仓|定增|增发|配股|回购|大宗交易|股权激励|员工持股|股份解禁|限售股|解除限售|股份变动|重大资产重组|可转债/;
+      const events = (announcements.items || []).filter(item => {
+        const title = String(item.title || "");
+        const date = new Date(String(item.date || "").replace(/年|月/g, "-").replace(/日/g, ""));
+        // 公告日期在最近90天内即可；公告中写明的减持、定增、解禁等执行日期可以在未来。
+        const within90 = Number.isNaN(date.getTime()) || now - date.getTime() <= 90 * 86400000;
+        return within90 && keywords.test(title);
+      });
+      if (!events.length) return "未发现";
+      const summaries = events.map(item => {
+        const title = String(item.title || "大宗事件");
+        const impact = eventImpact(title);
+        return `${escapeHtml(item.date || "日期未知")} ${impact.kind} <span class="event-impact ${impact.className}">${impact.label}</span>`;
+      });
+      return summaries.length > 3 ? `有${summaries.length}条：${summaries.slice(0, 3).join("；")}…` : `有${summaries.length}条：${summaries.join("；")}`;
+    }
+
+    function eventImpact(title) {
+      if (/增持/.test(title)) return {kind: "增持", label: "利好", className: "event-positive"};
+      if (/回购/.test(title)) return {kind: "回购", label: "利好", className: "event-positive"};
+      if (/股权激励|员工持股/.test(title)) return {kind: "激励/持股", label: "利好", className: "event-positive"};
+      if (/减持|减仓/.test(title)) return {kind: "减持", label: "利空", className: "event-negative"};
+      if (/解禁|限售股|解除限售/.test(title)) return {kind: "解禁", label: "利空", className: "event-negative"};
+      if (/大宗交易/.test(title)) return {kind: "大宗交易", label: "利空", className: "event-negative"};
+      if (/定增/.test(title)) return {kind: "定增", label: "中性", className: "event-neutral"};
+      if (/增发/.test(title)) return {kind: "增发", label: "中性", className: "event-neutral"};
+      if (/配股/.test(title)) return {kind: "配股", label: "中性", className: "event-neutral"};
+      if (/重大资产重组/.test(title)) return {kind: "重大重组", label: "中性", className: "event-neutral"};
+      if (/可转债/.test(title)) return {kind: "可转债", label: "中性", className: "event-neutral"};
+      return {kind: "股份变动", label: "中性", className: "event-neutral"};
+    }
+
+    function reductionEvents(supplemental) {
+      const announcements = supplemental?.announcements;
+      if (!announcements || announcements.available === false) return "公告接口暂不可用";
+      const now = Date.now();
+      const keywords = /增持|减持|减仓|定增|增发|配股|回购|大宗交易|股权激励|员工持股|股份解禁|限售股|解除限售|股份变动|重大资产重组|可转债/;
+      return (announcements.items || []).filter(item => {
+        const date = new Date(String(item.date || "").replace(/年|月/g, "-").replace(/日/g, ""));
+        return (Number.isNaN(date.getTime()) || now - date.getTime() <= 90 * 86400000) && keywords.test(String(item.title || ""));
+      }).map(item => `${item.date || "日期未知"} ${item.title || "大宗事件"}`).join("\n") || "近3个月未发现相关大宗事件";
+    }
+
+    function aggregateBars(bars, period) {
+      if (period === "daily") return bars.slice(-chartRange);
+      const groups = new Map();
+      bars.forEach(bar => {
+        const d = new Date(`${bar.trading_date}T00:00:00`);
+        const key = period === "weekly"
+          ? `${d.getFullYear()}-W${String(Math.ceil((d.getDay() + 6) / 7)).padStart(2, "0")}`
+          : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const item = groups.get(key) || {trading_date: bar.trading_date, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: 0};
+        item.high = Math.max(item.high, bar.high); item.low = Math.min(item.low, bar.low);
+        item.close = bar.close; item.volume += Number(bar.volume || 0); groups.set(key, item);
+      });
+      return [...groups.values()].slice(-Math.min(chartRange, 60));
+    }
+
+    function drawChart() {
+      const frame = document.getElementById("chartFrame");
+      const allSeries = chartPeriod === "intraday" ? (chartData?.intraday || []) : aggregateBars(chartData?.daily || [], chartPeriod);
+      const end = Math.max(0, allSeries.length - chartOffset);
+      const start = Math.max(0, end - Math.min(chartRange, allSeries.length));
+      const series = allSeries.slice(start, end);
+      if (!series.length) {
+        const message = chartPeriod === "intraday" && chartData ? "分时数据源暂时不可用，请稍后刷新" : (chartData?.warnings?.length ? "当前数据源暂未返回图表数据" : "等待行情数据");
+        frame.innerHTML = `<div class="chart-empty">${message}</div>`;
+        return;
+      }
+      frame.innerHTML = '<canvas id="marketChart" aria-label="行情图表"></canvas>';
+      const canvas = document.getElementById("marketChart");
+      canvas.style.cursor = "grab";
+      const width = Math.max(320, frame.clientWidth || 640);
+      const height = 250;
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = width * ratio; canvas.height = height * ratio;
+      const ctx = canvas.getContext("2d"); ctx.scale(ratio, ratio);
+      const pad = {left: 48, right: 12, top: 14, bottom: 30};
+      const chartW = width - pad.left - pad.right, chartH = height - pad.top - pad.bottom;
+      const values = chartPeriod === "intraday" ? series.map(x => x.price) : series.flatMap(x => [x.high, x.low]);
+      const min = Math.min(...values), max = Math.max(...values), span = Math.max(max - min, max * 0.01, 0.01);
+      const y = value => pad.top + (max - value) / span * chartH;
+      const x = index => pad.left + (series.length === 1 ? chartW / 2 : index / (series.length - 1) * chartW);
+      // Canvas 不识别 light-dark() 自定义属性，因此这里使用明确的图表色：A股上涨红、下跌绿。
+      const lineColor = "#c9ced8";
+      const mutedColor = "#667085";
+      const accentColor = "#2563eb";
+      const riseColor = "#d93025";
+      const fallColor = "#168a55";
+      ctx.strokeStyle = lineColor;
+      ctx.fillStyle = mutedColor;
+      ctx.font = "11px system-ui";
+      for (let i = 0; i < 4; i++) { const value = min + (span * i / 3); const yy = y(value); ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(width - pad.right, yy); ctx.stroke(); ctx.fillText(value.toFixed(2), 5, yy + 4); }
+      if (chartPeriod === "intraday") {
+        const prices = series.map(item => item.price);
+        ctx.strokeStyle = accentColor; ctx.lineWidth = 2; ctx.beginPath();
+        prices.forEach((value, index) => index ? ctx.lineTo(x(index), y(value)) : ctx.moveTo(x(index), y(value))); ctx.stroke();
+        ctx.strokeStyle = "rgba(148,163,184,.75)"; ctx.lineWidth = 1; ctx.beginPath();
+        series.forEach((item, index) => { if (item.average != null) index ? ctx.lineTo(x(index), y(item.average)) : ctx.moveTo(x(index), y(item.average)); }); ctx.stroke();
+      } else {
+        const candleW = Math.max(2, Math.min(10, chartW / series.length * .55));
+        series.forEach((item, index) => { const xx = x(index), rising = item.close >= item.open; const color = rising ? riseColor : fallColor; ctx.strokeStyle = color; ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(xx, y(item.high)); ctx.lineTo(xx, y(item.low)); ctx.stroke(); const top = y(Math.max(item.open, item.close)), bottom = y(Math.min(item.open, item.close)); ctx.fillRect(xx - candleW / 2, top, candleW, Math.max(1, bottom - top)); });
+      }
+      ctx.fillStyle = mutedColor;
+      const labels = chartPeriod === "intraday" ? [series[0]?.time, series[Math.floor(series.length / 2)]?.time, series.at(-1)?.time] : [series[0]?.trading_date, series[Math.floor(series.length / 2)]?.trading_date, series.at(-1)?.trading_date];
+      labels.forEach((label, index) => { if (label) { ctx.textAlign = index === 0 ? "left" : index === 2 ? "right" : "center"; ctx.fillText(String(label).slice(0, 16), pad.left + index * chartW / 2, height - 8); } });
+      ctx.textAlign = "left";
+      canvas.addEventListener("wheel", event => {
+        event.preventDefault();
+        const step = event.deltaY < 0 ? -10 : 10;
+        chartRange = Math.max(20, Math.min(240, chartRange + step));
+        chartOffset = 0;
+        document.getElementById("chartZoom").value = chartRange;
+        document.getElementById("chartZoomLabel").textContent = `${chartRange}根`;
+        drawChart();
+      }, {passive: false});
+      let dragging = false, lastX = 0;
+      canvas.addEventListener("pointerdown", event => { dragging = true; lastX = event.clientX; canvas.setPointerCapture(event.pointerId); canvas.style.cursor = "grabbing"; });
+      canvas.addEventListener("pointermove", event => {
+        if (!dragging) return;
+        const step = Math.round((lastX - event.clientX) / Math.max(3, chartW / Math.max(1, series.length)));
+        if (step) { chartOffset = Math.max(0, Math.min(Math.max(0, allSeries.length - chartRange), chartOffset + step)); lastX = event.clientX; drawChart(); }
+      });
+      canvas.addEventListener("pointerup", event => { dragging = false; canvas.releasePointerCapture(event.pointerId); canvas.style.cursor = "grab"; });
+      canvas.addEventListener("pointercancel", () => { dragging = false; canvas.style.cursor = "grab"; });
+    }
+
+    async function loadChart(symbol) {
+      document.getElementById("chartMeta").textContent = "图表加载中…";
+      try {
+        const response = await fetch(`/api/chart?symbol=${encodeURIComponent(symbol)}`, {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "图表数据暂不可用");
+        chartData = data; drawChart(); updateVolumeAdvice();
+        document.getElementById("chartMeta").textContent = data.intraday?.length
+          ? `${data.intraday.length}个分时点 · ${data.daily?.length || 0}根日K`
+          : `分时数据暂不可用 · ${data.daily?.length || 0}根日K`;
+      } catch (error) {
+        chartData = null; drawChart(); updateVolumeAdvice(); document.getElementById("chartMeta").textContent = "图表数据暂不可用";
+      }
+    }
+
+    function hideSearchResults() {
+      document.getElementById("searchResults").hidden = true;
+      activeSearchIndex = -1;
+    }
+
+    function renderSearchResults() {
+      const box = document.getElementById("searchResults");
+      if (!searchMatches.length) {
+        box.hidden = true;
+        return;
+      }
+      box.innerHTML = searchMatches.map((item, index) => `
+        <button type="button" class="search-result${index === activeSearchIndex ? " active" : ""}" role="option" aria-selected="${index === activeSearchIndex}" onclick="selectSearchMatch(${index})">
+          <span>${escapeHtml(item.name)} <span class="search-result-code">${escapeHtml(item.symbol)}</span></span>
+          <span class="search-result-code">${escapeHtml(item.pinyin || item.security_type)}</span>
+        </button>`).join("");
+      box.hidden = false;
+    }
+
+    function matchingSearchResult(query) {
+      const normalized = String(query || "").trim().toUpperCase().replace(/-/g, ".");
+      return searchMatches.find(item => item.symbol === normalized || item.code === normalized) || searchMatches[0] || null;
+    }
+
+    async function searchStocks({selectFirst = false} = {}) {
+      const query = document.getElementById("symbol").value.trim();
+      if (!query) {
+        searchMatches = [];
+        hideSearchResults();
+        return [];
+      }
+      const requestId = ++searchRequestId;
+      try {
+        const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "搜索暂不可用");
+        if (requestId !== searchRequestId || document.getElementById("symbol").value.trim() !== query) return [];
+        searchQuery = query;
+        searchMatches = data.matches || [];
+        activeSearchIndex = -1;
+        if (selectFirst) {
+          const match = matchingSearchResult(query);
+          if (match) {
+            await selectSearchMatch(searchMatches.indexOf(match));
+          } else {
+            document.getElementById("qName").textContent = "未找到匹配股票";
+          }
+        } else {
+          renderSearchResults();
+        }
+        return searchMatches;
+      } catch (error) {
+        if (requestId === searchRequestId) {
+          searchMatches = [];
+          hideSearchResults();
+        }
+        return [];
+      }
+    }
+
+    async function loadQuote(symbol, {analyze = false} = {}) {
+      const button = document.getElementById("quoteBtn");
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`, {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok || !data.quote) throw new Error("实时行情暂时不可用，请检查网络或稍后重试");
+        renderQuote(data.quote, data);
+        loadChart(symbol);
+        if (latestLivePortfolio) updateRiskFromPortfolio(latestLivePortfolio);
+        if (analyze) {
+          useRealtimeModelInputs();
+          autoEvaluate({force: true});
+        }
+      } catch (error) {
+        document.getElementById("qName").textContent = error.message;
+        document.getElementById("qPrice").textContent = "—";
+      } finally { button.disabled = false; }
+    }
+
+    async function selectSearchMatch(index) {
+      const match = searchMatches[index];
+      if (!match) return;
+      clearHoldingSelection();
+      document.getElementById("symbol").value = match.symbol;
+      searchQuery = match.symbol;
+      searchMatches = [];
+      hideSearchResults();
+      await loadQuote(match.symbol, {analyze: true});
+    }
+
+    async function resolveSearchInput() {
+      const query = document.getElementById("symbol").value.trim();
+      if (!query) return;
+      const match = searchQuery === query ? matchingSearchResult(query) : null;
+      if (match) {
+        await selectSearchMatch(searchMatches.indexOf(match));
+        return;
+      }
+      const matches = await searchStocks({selectFirst: true});
+      if (matches.length) return;
+      if (/^(?:(?:SH|SZ|BJ)[.-]?)?\d{6}$/i.test(query)) {
+        clearHoldingSelection();
+        await loadQuote(query, {analyze: true});
+      }
+    }
+
+    function renderAccountHoldings(data) {
+      const table = document.getElementById("accountHoldingsTable");
+      if (!data.holdings.length) {
+        table.innerHTML = `<div class="empty">暂无有效持仓</div>`;
+        return;
+      }
+      const headers = [
+        ["identity", "名称/代码"], ["market_value", "市值 / 数量"], ["average_cost", "成本 / 现价"],
+        ["daily_profit", "当日盈亏"], ["weight", "仓位"], ["daily_amount", "当天成交额 / 量"],
+        ["volume_ratio", "量比/换手"], ["volume_relation", "量价关系"]
+      ];
+      table.innerHTML = `
+        <table class="account-holdings-table">
+          <thead><tr>${headers.map(([key, label]) => `<th><button type="button" class="sort-header${accountSort.key === key ? " active" : ""}" onclick="toggleAccountSort('${key}')" aria-label="按${label}排序">${label}<span class="sort-indicator">${accountSort.key === key ? (accountSort.direction === "asc" ? "↑" : "↓") : "↕"}</span></button></th>`).join("")}</tr></thead>
+          <tbody>${sortAccountHoldings(data.holdings).map(item => {
+            const dailyClass = item.daily_profit == null ? "" : (item.daily_profit >= 0 ? "positive" : "negative");
+            const selected = selectedHoldingSymbols.has(item.symbol);
+            const dailyProfitPct = item.daily_profit_pct ?? (item.price != null && item.previous_close ? item.price / item.previous_close - 1 : null);
+            return `<tr>
+              <td><div class="holding-select-cell"><button type="button" class="secondary holding-select-btn${selected ? " selected" : ""}" data-select-holding="${escapeHtml(item.symbol)}" aria-pressed="${selected}" onclick="toggleHoldingSelection(this)"><span class="holding-select-state">${selected ? "已选中" : "选择"}</span><span>${escapeHtml(item.name || "—")}</span><span class="holding-select-symbol">${escapeHtml(item.symbol)}</span></button></div></td>
+              <td><div>${fmtMoney(item.market_value)}</div><div class="small-label">${item.quantity}</div></td>
+              <td><div>${item.average_cost == null ? "成本 —" : `成本 ${Number(item.average_cost).toFixed(2)}`}</div><div class="small-label">${item.price == null ? "现价 —" : `现价 ${Number(item.price).toFixed(2)}`}</div></td>
+              <td class="${dailyClass}">${item.daily_profit == null ? "—" : fmtMoney(item.daily_profit)}<div class="small-label ${dailyClass}">${fmtPercent(dailyProfitPct)}</div></td>
+              <td>${(item.weight * 100).toFixed(1)}%</td>
+              <td><div>${fmtAmount(item.daily_amount)}</div><div class="small-label">${fmtVolume(item.volume)}</div></td>
+              <td><div>${fmtVolumeRatio(item.volume_ratio)}</div><div class="small-label">${fmtTurnover(item.turnover_pct)}</div></td>
+              <td>${escapeHtml(item.volume_relation || "—")}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>`;
+    }
+
+    function accountSortValue(item, key) {
+      if (key === "identity") return `${item.name || ""} ${item.symbol || ""}`;
+      if (key === "volume_relation") return item.volume_relation || "";
+      return Number(item[key]);
+    }
+
+    function sortAccountHoldings(rows) {
+      if (!accountSort.key) return rows;
+      const {key, direction} = accountSort;
+      const multiplier = direction === "asc" ? 1 : -1;
+      return [...rows].sort((left, right) => {
+        const a = accountSortValue(left, key);
+        const b = accountSortValue(right, key);
+        const aMissing = typeof a === "number" && !Number.isFinite(a);
+        const bMissing = typeof b === "number" && !Number.isFinite(b);
+        if (aMissing || bMissing) return aMissing === bMissing ? 0 : (aMissing ? 1 : -1);
+        const comparison = typeof a === "string" ? a.localeCompare(b, "zh-CN") : a - b;
+        return comparison * multiplier;
+      });
+    }
+
+    function toggleAccountSort(key) {
+      accountSort = accountSort.key === key
+        ? {key, direction: accountSort.direction === "asc" ? "desc" : "asc"}
+        : {key, direction: key === "identity" || key === "volume_relation" ? "asc" : "desc"};
+      if (latestLivePortfolio) updateRiskFromPortfolio(latestLivePortfolio);
+    }
+
+    function clearHoldingSelection() {
+      if (!selectedHoldingSymbols.size) return;
+      selectedHoldingSymbols.clear();
+      document.querySelectorAll("button[data-select-holding]").forEach(item => {
+        item.classList.remove("selected");
+        item.setAttribute("aria-pressed", "false");
+        const state = item.querySelector(".holding-select-state");
+        if (state) state.textContent = "选择";
+      });
+    }
+
+    function toggleHoldingSelection(button) {
+      const symbol = button.getAttribute("data-select-holding");
+      const selected = selectedHoldingSymbols.has(symbol);
+      selectedHoldingSymbols.clear();
+      if (!selected) selectedHoldingSymbols.add(symbol);
+      document.querySelectorAll("button[data-select-holding]").forEach(item => {
+        const active = selectedHoldingSymbols.has(item.getAttribute("data-select-holding"));
+        item.classList.toggle("selected", active);
+        item.setAttribute("aria-pressed", String(active));
+        const state = item.querySelector(".holding-select-state");
+        if (state) state.textContent = active ? "已选中" : "选择";
+      });
+      if (!selected) {
+        detailedAnalysisSymbol = symbol;
+        document.getElementById("symbol").value = symbol;
+        document.getElementById("tradeSymbol").value = symbol;
+        if (latestLivePortfolio) updateRiskFromPortfolio(latestLivePortfolio);
+        useRealtimeModelInputs();
+        autoEvaluate({force: true});
+      }
+    }
+
+    function selectedHoldingSymbol() {
+      return selectedHoldingSymbols.values().next().value || "";
+    }
+
+    function currentAutoAnalysisInterval() {
+      return realtimeModelRefreshInterval;
+    }
+
+    function updateRiskFromPortfolio(data, {recompute = false} = {}) {
+      const symbol = selectedHoldingSymbol() || detailedAnalysisSymbol;
+      const bareSymbol = value => String(value || "").replace(/^(SH|SZ)\./i, "");
+      const selected = data.holdings.find(item => bareSymbol(item.symbol) === bareSymbol(symbol));
+      const totalPositionPct = data.total_assets ? (data.positions_value / data.total_assets) * 100 : 0;
+      const dayProfit = Number(data.daily_profit || 0);
+      const dayProfitPct = data.daily_profit_pct ?? null;
+      const amount = selected?.daily_amount ?? (bareSymbol(latestQuote?.symbol) === bareSymbol(symbol) ? latestQuote.amount : null);
+      riskState = {
+        total_position_pct: totalPositionPct / 100,
+        position_pct: selected ? selected.weight : 0,
+        daily_amount: amount,
+        cash_available: data.cash == null ? null : Number(data.cash)
+      };
+
+      const snapshot = document.getElementById("accountSnapshot");
+      snapshot.hidden = false;
+      const totalPosition = data.total_assets ? data.positions_value / data.total_assets : 0;
+      snapshot.innerHTML = `
+        <div class="metric"><div class="label">总资产</div><div class="value">${fmtMoney(data.total_assets)}</div></div>
+        <div class="metric"><div class="label">持仓市值</div><div class="value">${fmtMoney(data.positions_value)}</div></div>
+        <div class="metric"><div class="label">账户现金</div><div class="value">${fmtMoney(data.cash)}</div></div>
+        <div class="metric"><div class="label">账户当日盈亏</div><div class="value ${dayProfit >= 0 ? "positive" : "negative"}">${fmtMoney(dayProfit)}<div class="small-label ${dayProfit >= 0 ? "positive" : "negative"}">${fmtPercent(dayProfitPct)}</div></div></div>
+        <div class="metric"><div class="label">总仓位</div><div class="value">${(totalPosition * 100).toFixed(1)}%</div></div>`;
+      renderAccountHoldings(data);
+      if (recompute) evaluate();
+    }
+
+    function riskPayload() {
+      return {...riskState};
+    }
+
+    function payload() {
+      const features = Object.fromEntries(featureDefs.map(([key]) => [key, Number(document.getElementById(`f-${key}`).value)]));
+      return {
+        symbol: detailedAnalysisSymbol || selectedHoldingSymbol(),
+        data_status: "fresh",
+        features,
+        risk: riskPayload(),
+        bars: []
+      };
+    }
+
+    function renderSupplemental(data) {
+      const box = document.getElementById("supplemental");
+      if (!data) return;
+      const announcements = data.announcements || {};
+      const fundFlow = data.fund_flow || {};
+      const limitUp = data.limit_up_pool || {};
+      const signedAmount = value => value == null ? "—" : (Number(value) >= 0 ? "+" : "-") + fmtAmount(Math.abs(Number(value)));
+      const announcementItems = (announcements.items || []).slice(0, 4);
+      const topLimitUp = (limitUp.top || []).slice(0, 5);
+      const selected = limitUp.selected;
+      const selectedText = selected
+        ? "已在涨停池：" + (selected.name || selected.symbol) + (selected.continuous ? "，" + selected.continuous + "连板" : "") + (selected.reason ? "；" + selected.reason : "")
+        : (limitUp.available ? "当前股票未进入今日涨停池" : "暂不可用");
+      box.className = "supplemental-grid";
+      box.innerHTML = [
+        '<div class="supplemental-block"><div class="supplemental-title"><span>公告</span><span class="supplemental-meta">' + (announcements.available ? (announcements.count || 0) + "条" : "暂不可用") + '</span></div>',
+        announcementItems.length
+          ? '<ul class="supplemental-list">' + announcementItems.map(item => "<li>" + escapeHtml(item.date || "") + " " + escapeHtml(item.title || "") + "</li>").join("") + "</ul>"
+          : '<div class="supplemental-meta">' + (announcements.available ? "近45天暂无公告" : "公告接口暂不可用") + "</div>",
+        "</div>",
+        '<div class="supplemental-block"><div class="supplemental-title"><span>资金流</span><span class="supplemental-meta">' + (fundFlow.trade_date || (fundFlow.available ? "今日" : "暂不可用")) + "</span></div>",
+        fundFlow.available
+          ? '<div class="' + (Number(fundFlow.main_net_inflow) >= 0 ? "positive" : "negative") + '">' + escapeHtml(fundFlow.trend || "") + " " + signedAmount(fundFlow.main_net_inflow) + "；近5日 " + signedAmount(fundFlow.five_day_net_inflow) + "</div>"
+          : '<div class="supplemental-meta">资金流接口暂不可用</div>',
+        "</div>",
+        '<div class="supplemental-block"><div class="supplemental-title"><span>涨停池</span><span class="supplemental-meta">' + (limitUp.available ? (limitUp.count || 0) + "只" + (limitUp.max_continuous ? "，最高" + limitUp.max_continuous + "板" : "") : "暂不可用") + "</span></div>",
+        '<div class="supplemental-meta">' + escapeHtml(selectedText) + "</div>",
+        topLimitUp.length ? '<ul class="supplemental-list">' + topLimitUp.map(item => "<li>" + escapeHtml(item.name || item.symbol || "") + (item.continuous ? " · " + item.continuous + "板" : "") + (item.reason ? " · " + escapeHtml(item.reason) : "") + "</li>").join("") + "</ul>" : "",
+        "</div>",
+        '<div class="supplemental-meta">公告与资金流按个股读取；涨停池为当日全市场快照。数据仅作证据，不替代风控规则。</div>'
+      ].join("");
+    }
+
+    function renderSearchDecision(data) {
+      const box = document.getElementById("searchDecision");
+      if (!data) {
+        box.hidden = true;
+        return;
+      }
+      box.hidden = false;
+      const action = document.getElementById("qDecisionAction");
+      action.className = `search-decision-action ${data.final_action || ""}`;
+      action.textContent = actionLabels[data.final_action] || data.final_action || "—";
+      document.getElementById("qDecisionScore").textContent = data.score == null ? "—" : `${data.score >= 0 ? "+" : ""}${Number(data.score).toFixed(3)}`;
+      document.getElementById("qDecisionConfidence").textContent = data.confidence == null ? "—" : `${Math.round(Number(data.confidence) * 100)}% · 规则符合分`;
+      document.getElementById("qDecisionExecutable").textContent = data.executable ? "是" : "否";
+      const updatedAt = new Date().toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+      const name = latestQuote?.name || data.symbol || "当前个股";
+      document.getElementById("searchDecisionStatus").textContent = `已更新：${name} · ${updatedAt}`;
+    }
+
+    function renderInvalidationState(signal) {
+      const active = signal?.metadata?.invalidation_active;
+      if (active === true) return '<span class="invalidation-state invalid">已触发风险</span>';
+      if (active === false) return '<span class="invalidation-state valid">未触发风险</span>';
+      return '<span class="invalidation-state unknown">暂无法确认（数据不足）</span>';
+    }
+
+    function renderInvalidationDetails(signal) {
+      const details = Array.isArray(signal?.metadata?.invalidation_details) ? signal.metadata.invalidation_details : [];
+      if (!details.length) return "";
+      return `<ul class="invalidation-details">${details.map(detail => `
+        <li><span class="invalidation-factor">${escapeHtml(detail.parameter || "参数")}=${escapeHtml(detail.value || "—")}</span><span class="invalidation-note">（正常${escapeHtml(detail.normal_range || "范围未知")}；${escapeHtml(detail.reason || "偏离预设条件")}）</span></li>`).join("")}</ul>`;
+    }
+
+    function renderDecision(data, supplemental = null) {
+      renderSearchDecision(data);
+      document.getElementById("decisionEmpty").hidden = true;
+      document.getElementById("decisionView").hidden = false;
+      if (supplemental) renderSupplemental(supplemental);
+      const bareSymbol = value => String(value || "").replace(/^(SH|SZ)\./i, "");
+      const decisionSymbol = data.symbol || document.getElementById("symbol").value.trim();
+      const quoteMatches = latestQuote && bareSymbol(latestQuote.symbol) === bareSymbol(decisionSymbol);
+      document.getElementById("decisionSymbol").textContent = quoteMatches
+        ? `${latestQuote.name} ${latestQuote.symbol}`
+        : (decisionSymbol || "尚未选择股票");
+      document.getElementById("evidenceSymbol").textContent = quoteMatches
+        ? `${latestQuote.name} ${latestQuote.symbol}`
+        : (decisionSymbol || "尚未选择股票");
+      const action = document.getElementById("action");
+      action.className = `action ${data.final_action}`;
+      action.textContent = actionLabels[data.final_action] || data.final_action;
+      document.getElementById("score").textContent = `${data.score >= 0 ? "+" : ""}${data.score.toFixed(3)}`;
+      document.getElementById("confidence").textContent = `${Math.round(data.confidence * 100)}%`;
+      document.getElementById("executable").textContent = data.executable ? "是" : "否";
+      document.getElementById("confidenceFill").style.width = `${Math.round(data.confidence * 100)}%`;
+
+      document.getElementById("weights").className = "";
+      document.getElementById("weights").innerHTML = Object.entries(data.strategy_weights).map(([name, weight]) => `
+        <div class="weight-row"><span>${escapeHtml(strategyLabels[name] || name)}</span><div class="track"><div class="fill" style="width:${Math.round(weight * 100)}%"></div></div><span>${Math.round(weight * 100)}%</span></div>`).join("");
+
+      document.getElementById("strategies").className = "";
+      document.getElementById("strategies").innerHTML = data.strategy_signals.map(signal => `
+        <article class="strategy">
+          <div class="strategy-head"><span class="strategy-name">${escapeHtml(strategyLabels[signal.strategy] || signal.strategy)}</span><span class="pill">${actionLabels[signal.action] || signal.action} · 输入覆盖 ${Math.round(signal.confidence * 100)}%</span></div>
+          <div class="sub">${escapeHtml(signal.thesis)}</div>
+          <ul class="evidence">${signal.evidence.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+          <div class="footnote">${renderInvalidationState(signal)} · 风险条件：${signal.invalidation.map(escapeHtml).join("；") || "未提供"}</div>
+          ${renderInvalidationDetails(signal)}
+        </article>`).join("");
+
+      const risks = [
+        ...data.vetoes.map(item => `<li class="danger">否决：${escapeHtml(item)}</li>`),
+        ...data.warnings.map(item => `<li class="warning">警告：${escapeHtml(item)}</li>`)
+      ];
+      const riskBox = document.getElementById("risks");
+      riskBox.className = risks.length ? "" : "empty";
+      riskBox.innerHTML = risks.length ? `<ul class="risk-list">${risks.join("")}</ul>` : "当前没有触发警告或否决";
+    }
+
+    async function evaluate() {
+      const button = document.getElementById("runBtn");
+      const status = document.getElementById("status");
+      if (!scenarioMode) return;
+      button.disabled = true;
+      status.textContent = "计算中…";
+      try {
+        const response = await fetch("/api/evaluate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload())});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "评估失败");
+        renderDecision(data);
+        status.textContent = "已更新";
+      } catch (error) { status.textContent = error.message; }
+      finally { button.disabled = !scenarioMode; }
+    }
+
+    async function autoEvaluate({force = false, linkDetailed = false} = {}) {
+      const status = document.getElementById("status");
+      const selectedSymbol = selectedHoldingSymbol();
+      const symbol = selectedSymbol || document.getElementById("symbol").value.trim();
+      if (selectedSymbol) document.getElementById("symbol").value = selectedSymbol;
+      const now = Date.now();
+      if (scenarioMode && !force) return;
+      if (autoAnalysisInFlight) return;
+      if (!force && symbol === lastAutoAnalysisSymbol && now - lastAutoAnalysisAt < currentAutoAnalysisInterval()) return;
+      autoAnalysisInFlight = true;
+      lastAutoAnalysisAt = now;
+      lastAutoAnalysisSymbol = symbol;
+      if (selectedSymbol) status.textContent = `正在分析已选股票 ${selectedSymbol}…`;
+      else document.getElementById("searchDecisionStatus").textContent = `正在分析：${symbol}…`;
+      try {
+        const response = await fetch("/api/auto-evaluate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({symbol, risk: riskPayload()})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "自动分析失败");
+        Object.entries(data.features).forEach(([key, value]) => {
+          const slider = document.getElementById(`f-${key}`);
+          if (!slider) return;
+          slider.value = value;
+          document.getElementById(`v-${key}`).textContent = Number(value).toFixed(2);
+        });
+        renderQuote(data.quote, {
+          ...data,
+          turnover_pct: data.quote?.turnover_pct,
+          pe_ttm: data.quote?.pe_ttm,
+          pb: data.quote?.pb,
+          reduction_status: reductionStatus(data.supplemental),
+          reduction_events: reductionEvents(data.supplemental)
+        });
+        renderDecision(data.decision, data.supplemental);
+        renderSearchDecision(data.decision);
+        const omitted = data.omitted_features.length ? `；${data.omitted_features.length}项输入因数据源未接入而弃权` : "";
+        if (selectedSymbol) status.textContent = `已分析已选股票（${data.quote?.name || symbol}）${omitted}`;
+        else if (linkDetailed) status.textContent = `已将${data.quote?.name || symbol}关联到下方模型并完成分析${omitted}`;
+        else status.textContent = `实时模型已更新（${data.quote?.name || symbol}）${omitted}`;
+      } catch (error) {
+        if (selectedSymbol || linkDetailed) status.textContent = "自动数据源暂时不可用，请检查网络";
+        else document.getElementById("searchDecisionStatus").textContent = "自动分析数据源暂时不可用，请稍后重试";
+      }
+      finally { autoAnalysisInFlight = false; }
+    }
+
+    async function analyzeSearchStock() {
+      const symbol = latestQuote?.symbol || document.getElementById("symbol").value.trim();
+      if (!symbol) return;
+      clearHoldingSelection();
+      detailedAnalysisSymbol = symbol;
+      document.getElementById("symbol").value = symbol;
+      useRealtimeModelInputs();
+      await autoEvaluate({force: true, linkDetailed: true});
+    }
+
+    function fmtScreenerScore(score) {
+      const value = Number(score);
+      return Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "—";
+    }
+
+    function renderScreener(data) {
+      const summary = document.getElementById("screenerSummary");
+      summary.hidden = false;
+      summary.innerHTML = [
+        `全市场 ${Number(data.universe_count || 0).toLocaleString()} 只`,
+        `初筛 ${Number(data.eligible_count || 0).toLocaleString()} 只`,
+        `模型分析 ${Number(data.analyzed_count || 0)} 只`,
+        `展示 ${Number(data.results?.length || 0)} 只`,
+        `更新 ${escapeHtml(String(data.generated_at || "").slice(11, 19))}`
+      ].map(text => `<span>${text}</span>`).join("");
+      const table = document.getElementById("screenerTable");
+      const rows = data.results || [];
+      if (!rows.length) {
+        table.innerHTML = `<div class="empty">当前条件下没有得到“买入/观察”的候选。可适当降低最低日成交额后再试。</div>`;
+        return;
+      }
+      table.innerHTML = `<table class="screener-table"><thead><tr><th>排名</th><th>股票</th><th>模型动作</th><th>综合分</th><th>规则符合分</th><th>涨跌幅</th><th>成交额 / 换手</th><th>模型依据</th><th></th></tr></thead><tbody>${rows.map(item => {
+        const action = actionLabels[item.final_action] || item.final_action;
+        const change = Number(item.change_pct || 0);
+        return `<tr>
+          <td>${item.rank}</td>
+          <td><div class="screener-stock">${escapeHtml(item.name || item.symbol)}</div><div class="small-label">${escapeHtml(item.symbol || "")}</div></td>
+          <td><span class="screener-action ${escapeHtml(item.final_action || "hold")}">${escapeHtml(action)}</span><div class="small-label">${item.executable ? "可执行" : "暂不可执行"}</div></td>
+          <td>${fmtScreenerScore(item.score)}</td><td>${Math.round(Number(item.confidence || 0) * 100)}%</td>
+          <td class="${change >= 0 ? "positive" : "negative"}">${change >= 0 ? "+" : ""}${change.toFixed(2)}%</td>
+          <td>${fmtAmount(item.amount)}<div class="small-label">${fmtTurnover(item.turnover_pct)}</div></td>
+          <td class="screener-basis" title="${escapeHtml((item.basis || []).join("；"))}">${escapeHtml((item.basis || []).join("；") || "模型综合判断")}</td>
+          <td><button type="button" class="secondary screener-analyze-btn" data-screener-symbol="${escapeHtml(item.symbol || "")}">详细分析</button></td>
+        </tr>`;
+      }).join("")}</tbody></table>`;
+    }
+
+    async function runMarketScreener() {
+      const button = document.getElementById("runScreenerBtn");
+      const status = document.getElementById("screenerStatus");
+      button.disabled = true;
+      status.textContent = "正在读取全市场快照并运行模型初筛，通常需要十几秒…";
+      try {
+        const response = await fetch("/api/screener", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            minimum_amount: Math.max(0.1, Number(document.getElementById("screenerAmount").value) || 0.5) * 100_000_000,
+            result_limit: Math.max(5, Math.min(30, Number(document.getElementById("screenerLimit").value) || 20))
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "全市场筛选失败");
+        renderScreener(data);
+        status.textContent = data.failed_count ? `筛选完成；${data.failed_count} 只候选因数据不完整跳过。` : "筛选完成。点击“详细分析”可补齐单股公告、资金流与涨停池。";
+      } catch (error) {
+        status.textContent = error.message || "全市场筛选失败，请稍后重试";
+      } finally { button.disabled = false; }
+    }
+
+    async function analyzeScreenerStock(symbol) {
+      if (!symbol) return;
+      clearHoldingSelection();
+      detailedAnalysisSymbol = symbol;
+      document.getElementById("symbol").value = symbol;
+      document.getElementById("tradeSymbol").value = symbol;
+      useRealtimeModelInputs();
+      await loadQuote(symbol, {analyze: false});
+      await autoEvaluate({force: true, linkDetailed: true});
+    }
+
+    function renderPortfolio(data) {
+      portfolioAnalysisVisible = true;
+      const summary = document.getElementById("portfolioSummary");
+      summary.hidden = false;
+      const profitClass = data.known_profit >= 0 ? "positive" : "negative";
+      summary.innerHTML = `
+        <div class="metric"><div class="label">总资产</div><div class="value">${fmtMoney(data.total_assets)}</div></div>
+        <div class="metric"><div class="label">持仓市值</div><div class="value">${fmtMoney(data.positions_value)}</div></div>
+        <div class="metric"><div class="label">已知成本盈亏</div><div class="value ${data.known_cost_basis ? profitClass : ""}">${data.known_cost_basis ? fmtMoney(data.known_profit) : "待录成本"}</div></div>
+        <div class="metric"><div class="label">最大单股仓位</div><div class="value">${(data.largest_position_pct * 100).toFixed(1)}%</div></div>`;
+
+      document.getElementById("portfolioTable").innerHTML = `
+        <table class="portfolio-table">
+          <thead><tr><th>股票</th><th>数量</th><th>现价</th><th>市值</th><th>权重</th><th>盈亏</th><th>模型</th><th>组合动作</th></tr></thead>
+          <tbody>${data.holdings.map(item => {
+            const profitClass = (item.profit || 0) >= 0 ? "positive" : "negative";
+            return `<tr>
+              <td>${escapeHtml(item.name || item.symbol)}<div class="small-label">${escapeHtml(item.symbol)}</div></td>
+              <td>${item.quantity}</td><td>${item.price == null ? "—" : Number(item.price).toFixed(2)}</td>
+              <td>${fmtMoney(item.market_value)}</td><td>${(item.weight * 100).toFixed(1)}%</td>
+              <td class="${item.profit == null ? "" : profitClass}">${item.profit == null ? "待录成本" : `${fmtMoney(item.profit)} / ${(item.profit_pct * 100).toFixed(1)}%`}</td>
+              <td>${item.model_action ? actionLabels[item.model_action] : "失败"}${item.confidence == null ? "" : ` · ${Math.round(item.confidence * 100)}%`}</td>
+              <td><span class="pill">${item.portfolio_action ? actionLabels[item.portfolio_action] : "—"}</span></td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>`;
+
+      const warnings = data.warnings.map(item => `<li class="warning">${escapeHtml(item)}</li>`).join("");
+      document.getElementById("portfolioWarnings").innerHTML = warnings ? `<ul class="risk-list">${warnings}</ul>` : `<div class="empty">没有触发组合级集中度警告</div>`;
+    }
+
+    async function analyzePortfolio({persist = true, silent = false, syncRisk = false} = {}) {
+      const button = document.getElementById("portfolioBtn");
+      const status = document.getElementById("portfolioStatus");
+      button.disabled = true;
+      if (!silent) status.textContent = "正在分析全部持仓…";
+      try {
+        if (persist) {
+          clearTimeout(portfolioSaveTimer);
+          portfolioSaveTimer = null;
+          await persistPortfolioState();
+        }
+        const payload = {
+          cash: Number(document.getElementById("portfolioCash").value) || 0,
+          holdings: holdings.map(item => ({
+            symbol: String(item.symbol || "").trim(),
+            quantity: Number(item.quantity) || 0,
+            average_cost: item.average_cost === "" || item.average_cost == null ? null : Number(item.average_cost)
+          }))
+        };
+        const response = await fetch("/api/portfolio", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "持仓分析失败");
+        renderPortfolio(data);
+        if (syncRisk) {
+          updateRiskFromPortfolio(data, {recompute: true});
+        }
+        if (!silent) status.textContent = `已分析${data.holdings.length}只持仓`;
+        return data;
+      } catch (error) { if (!silent) status.textContent = error.message; return null; }
+      finally { button.disabled = false; }
+    }
+
+    async function syncRiskFromPortfolio() {
+      const button = document.getElementById("syncRiskBtn");
+      const status = document.getElementById("riskSyncStatus");
+      button.disabled = true;
+      status.textContent = "正在读取持仓和最新行情…";
+      try {
+        const data = await analyzePortfolio({persist: false, silent: true, syncRisk: true});
+        if (!data) throw new Error("持仓或行情读取失败");
+        status.textContent = `已读取${data.holdings.length}只持仓，风险参数已更新`;
+      } catch (error) { status.textContent = error.message; }
+      finally { button.disabled = false; }
+    }
+
+    async function refreshLiveData() {
+      if (document.hidden || liveRefreshInFlight) return;
+      liveRefreshInFlight = true;
+      try {
+        const symbol = encodeURIComponent(document.getElementById("symbol").value.trim());
+        const [quoteResponse, portfolioResponse] = await Promise.all([
+          fetch(`/api/quote?symbol=${symbol}`, {cache: "no-store"}),
+          fetch("/api/portfolio-live", {cache: "no-store"})
+        ]);
+        const quoteData = await quoteResponse.json();
+        if (quoteResponse.ok && quoteData.quote) {
+          renderQuote(quoteData.quote, quoteData);
+          if (chartSymbol !== symbol) { chartSymbol = symbol; loadChart(symbol); }
+        }
+        const portfolioData = await portfolioResponse.json();
+        const data = portfolioData.data;
+        if (!portfolioResponse.ok || !data) return;
+        latestLivePortfolio = data;
+        const hasPendingLocalEdit = portfolioSaveTimer || Date.now() - portfolioLastEditAt < 1200;
+        if (data.version && data.version !== portfolioVersion && !hasPendingLocalEdit) {
+          portfolioVersion = data.version;
+          applyPortfolioState(data);
+        }
+        if (!hasPendingLocalEdit) {
+          updateRiskFromPortfolio(data);
+          // 行情每半秒刷新；分析请求由 autoEvaluate 根据是否选股限频。
+          autoEvaluate();
+        }
+      } catch { /* 保留上一笔有效行情，下一次半秒刷新继续尝试 */ }
+      finally { liveRefreshInFlight = false; }
+    }
+
+    function startLiveRefresh() {
+      refreshLiveData();
+      setInterval(refreshLiveData, 500);
+    }
+
+    document.getElementById("quoteBtn").addEventListener("click", resolveSearchInput);
+    document.getElementById("quoteAnalyzeBtn").addEventListener("click", analyzeSearchStock);
+    document.querySelectorAll("[data-chart-period]").forEach(button => button.addEventListener("click", () => {
+      chartPeriod = button.dataset.chartPeriod;
+      document.querySelectorAll("[data-chart-period]").forEach(item => item.classList.toggle("active", item === button));
+      drawChart();
+    }));
+    document.querySelectorAll("[data-chart-range]").forEach(button => button.addEventListener("click", () => {
+      chartRange = Number(button.dataset.chartRange) || 90;
+      document.querySelectorAll("[data-chart-range]").forEach(item => item.classList.toggle("active", item === button));
+      drawChart();
+    }));
+    document.getElementById("chartZoom").addEventListener("input", event => {
+      chartRange = Number(event.target.value) || 90;
+      chartOffset = 0;
+      document.getElementById("chartZoomLabel").textContent = `${chartRange}根`;
+      drawChart();
+    });
+    document.getElementById("chartToggle").addEventListener("click", () => {
+      const box = document.getElementById("quoteChart");
+      const collapsed = box.classList.toggle("collapsed");
+      document.getElementById("chartToggle").textContent = collapsed ? "展开图表" : "收起图表";
+      document.getElementById("chartToggle").setAttribute("aria-expanded", String(!collapsed));
+    });
+    window.addEventListener("resize", () => { if (chartData) drawChart(); });
+    document.getElementById("symbol").addEventListener("input", () => {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => searchStocks(), 180);
+    });
+    document.getElementById("symbol").addEventListener("keydown", async event => {
+      if (event.key === "ArrowDown" && searchMatches.length) {
+        event.preventDefault();
+        activeSearchIndex = Math.min(activeSearchIndex + 1, searchMatches.length - 1);
+        renderSearchResults();
+      } else if (event.key === "ArrowUp" && searchMatches.length) {
+        event.preventDefault();
+        activeSearchIndex = Math.max(activeSearchIndex - 1, 0);
+        renderSearchResults();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (searchMatches.length) await selectSearchMatch(activeSearchIndex >= 0 ? activeSearchIndex : 0);
+        else await resolveSearchInput();
+      } else if (event.key === "Escape") {
+        hideSearchResults();
+      }
+    });
+    document.addEventListener("click", event => {
+      if (!event.target.closest(".quote-card-search")) hideSearchResults();
+    });
+    document.getElementById("runBtn").addEventListener("click", evaluate);
+    document.getElementById("scenarioModeToggle").addEventListener("change", event => setScenarioMode(event.target.checked));
+    document.getElementById("addHoldingBtn").addEventListener("click", () => {
+      holdings.push({symbol: "", quantity: 0, average_cost: ""});
+      saveHoldings();
+      renderHoldingEditor();
+    });
+    document.getElementById("portfolioCash").addEventListener("input", saveHoldings);
+    document.getElementById("portfolioBtn").addEventListener("click", analyzePortfolio);
+    ["tradeSide", "tradeSymbol", "tradeQuantity", "tradePrice", "tradeCommissionRate"].forEach(id => document.getElementById(id).addEventListener("input", updateTradePreview));
+    document.getElementById("executeTradeBtn").addEventListener("click", executeTrade);
+    document.getElementById("syncRiskBtn").addEventListener("click", syncRiskFromPortfolio);
+    document.getElementById("runScreenerBtn").addEventListener("click", runMarketScreener);
+    document.getElementById("screenerTable").addEventListener("click", event => {
+      const button = event.target.closest("[data-screener-symbol]");
+      if (button) analyzeScreenerStock(button.dataset.screenerSymbol);
+    });
+
+    const layoutStorageKey = "xiao-a-dashboard-layout-v3";
+    const layoutSnapshotKey = "xiao-a-dashboard-layout-saved-v3";
+    const layoutLockedKey = "xiao-a-dashboard-layout-locked-v3";
+    // Repository default travels with the project when restored on another computer.
+    const syncedDefaultLayout = {
+      "account": {"x": 0, "y": 0, "width": 775.333, "height": 522},
+      "model-input": {"x": 2.6666768391927462, "y": 544.6667022705078, "width": 776.99, "height": 630},
+      "decision": {"x": 802.6666463216147, "y": 0.00000762939453125, "width": 543.333, "height": 181.323},
+      "weights": {"x": 804.0104522705078, "y": 201.99996948242188, "width": 541.979, "height": 320},
+      "evidence": {"x": 805.9999491373699, "y": 542.6667175292969, "width": 540, "height": 846},
+      "supplemental": {"x": 1.333333969116211, "y": 1196.6666564941406, "width": 779, "height": 421.323},
+      "risk": {"x": 806.0001118977865, "y": 1414.6666717529297, "width": 539.635, "height": 202.656},
+      "market-screener": {"x": 3.3333740234375, "y": 1643.3333206176758, "width": 1342.67, "height": 522}
+    };
+    const dashboardGrid = document.getElementById("dashboardGrid");
+    const layoutItems = Array.from(document.querySelectorAll(".layout-item"));
+    const layoutState = new Map();
+    const layoutLocked = new Set();
+    const layoutInteractors = new Map();
+    let layoutEditing = false;
+
+    function layoutNumber(value, fallback) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function defaultLayout(item) {
+      return {
+        col: layoutNumber(item.dataset.defaultCol, 1),
+        row: layoutNumber(item.dataset.defaultRow, 1),
+        colSpan: layoutNumber(item.dataset.defaultColSpan, 6),
+        rowSpan: layoutNumber(item.dataset.defaultRowSpan, 2)
+      };
+    }
+
+    function freeCanvasMetrics() {
+      const width = Math.max(900, dashboardGrid.clientWidth || 1100);
+      const gap = 18;
+      return {width, gap, column: (width - gap * 11) / 12, row: 90};
+    }
+
+    function gridToFree(layout) {
+      const {gap, column, row} = freeCanvasMetrics();
+      return {
+        x: (layout.col - 1) * (column + gap),
+        y: (layout.row - 1) * (row + gap),
+        width: layout.colSpan * column + (layout.colSpan - 1) * gap,
+        height: layout.rowSpan * row + (layout.rowSpan - 1) * gap
+      };
+    }
+
+    function normalizeFreeLayout(item, candidate) {
+      if (candidate && ["x", "y", "width", "height"].every(key => Number.isFinite(Number(candidate[key])))) {
+        return {x: Number(candidate.x), y: Number(candidate.y), width: Number(candidate.width), height: Number(candidate.height)};
+      }
+      return gridToFree({...defaultLayout(item), ...(candidate || {})});
+    }
+
+    function updateCanvasHeight() {
+      const bottom = [...layoutState.values()].reduce((max, layout) => Math.max(max, layout.y + layout.height), 0);
+      dashboardGrid.style.height = `${Math.max(720, bottom + 30)}px`;
+    }
+
+    function applyFreeLayout(widget, layout) {
+      const next = {
+        x: Math.max(0, Number(layout.x) || 0),
+        y: Math.max(0, Number(layout.y) || 0),
+        width: Math.max(180, Number(layout.width) || 180),
+        height: Math.max(120, Number(layout.height) || 120)
+      };
+      layoutState.set(widget.dataset.layoutWidget, next);
+      widget.style.width = `${next.width}px`;
+      widget.style.height = `${next.height}px`;
+      widget.style.transform = `translate(${next.x}px, ${next.y}px)`;
+      widget.dataset.x = String(next.x);
+      widget.dataset.y = String(next.y);
+      updateCanvasHeight();
+    }
+
+    function saveLayout() {
+      localStorage.setItem(layoutStorageKey, JSON.stringify(Object.fromEntries(layoutState.entries())));
+      document.getElementById("layoutStatus").textContent = "布局已保存";
+    }
+
+    function saveLayoutSnapshot() {
+      localStorage.setItem(layoutSnapshotKey, JSON.stringify(Object.fromEntries(layoutState.entries())));
+      saveLayout();
+      document.getElementById("layoutStatus").textContent = "当前布局已设为默认布局";
+    }
+
+    function restoreDefaultLayout() {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(layoutSnapshotKey) || "null"); } catch { saved = null; }
+      saved = saved || syncedDefaultLayout;
+      if (saved && typeof saved === "object") {
+        layoutItems.forEach(item => {
+          const widget = document.querySelector(`[data-layout-widget="${item.dataset.layoutId}"]`);
+          const candidate = saved[item.dataset.layoutId];
+          if (widget && candidate) applyFreeLayout(widget, normalizeFreeLayout(item, candidate));
+        });
+      } else {
+        layoutItems.forEach(item => {
+          const widget = document.querySelector(`[data-layout-widget="${item.dataset.layoutId}"]`);
+          if (widget) applyFreeLayout(widget, gridToFree(defaultLayout(item)));
+        });
+      }
+      saveLayout();
+      document.getElementById("layoutStatus").textContent = saved ? "已恢复默认布局" : "尚未设置默认布局，已恢复程序初始排列";
+    }
+
+    function loadLayout() {
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(layoutStorageKey) || "{}"); } catch { saved = {}; }
+      layoutItems.forEach(item => layoutState.set(item.dataset.layoutId, normalizeFreeLayout(item, saved[item.dataset.layoutId] || syncedDefaultLayout[item.dataset.layoutId])));
+    }
+
+    function setLayoutEditing(enabled) {
+      layoutEditing = enabled;
+      document.body.classList.toggle("layout-editing", enabled);
+      document.getElementById("layoutEditBtn").textContent = enabled ? "完成布局" : "调整布局";
+      layoutInteractors.forEach(interactable => {
+        interactable.draggable({enabled});
+        interactable.resizable({enabled});
+      });
+      document.getElementById("layoutStatus").textContent = enabled ? "自由拖动标题把手，四边和四角均可缩放" : "";
+    }
+
+    function updateLockButton(item) {
+      const button = item.querySelector(".layout-lock-handle");
+      if (!button) return;
+      const locked = layoutLocked.has(item.dataset.layoutId);
+      button.classList.toggle("locked", locked);
+      button.textContent = locked ? "🔒" : "🔓";
+      button.title = locked ? "已锁定模块，点击解锁" : "锁定模块位置和大小";
+      button.setAttribute("aria-label", locked ? `解锁${item.querySelector("h2")?.textContent || "模块"}` : `锁定${item.querySelector("h2")?.textContent || "模块"}`);
+    }
+
+    function toggleLayoutLock(item) {
+      const id = item.dataset.layoutId;
+      if (layoutLocked.has(id)) layoutLocked.delete(id);
+      else layoutLocked.add(id);
+      updateLockButton(item);
+      const interactable = layoutInteractors.get(id);
+      if (interactable) {
+        const enabled = layoutEditing && !layoutLocked.has(id);
+        interactable.draggable({enabled});
+        interactable.resizable({enabled});
+      }
+      localStorage.setItem(layoutLockedKey, JSON.stringify([...layoutLocked]));
+      saveLayout();
+      document.getElementById("layoutStatus").textContent = layoutLocked.has(id) ? "模块已锁定" : "模块已解锁";
+    }
+
+    function setupInteract(widget, item) {
+      const id = item.dataset.layoutId;
+      const interactable = interact(widget)
+        .draggable({
+          enabled: false,
+          allowFrom: ".layout-drag-handle",
+          modifiers: [interact.modifiers.restrictRect({restriction: dashboardGrid})],
+          listeners: {
+            start() { widget.classList.add("layout-dragging"); widget.style.zIndex = "100"; document.getElementById("layoutStatus").textContent = "正在自由移动模块"; },
+            move(event) {
+              const current = layoutState.get(id);
+              applyFreeLayout(widget, {...current, x: current.x + event.dx, y: current.y + event.dy});
+            },
+            end() { widget.classList.remove("layout-dragging"); widget.style.zIndex = ""; saveLayout(); document.getElementById("layoutStatus").textContent = "模块已自由定位"; }
+          }
+        })
+        .resizable({
+          enabled: false,
+          ignoreFrom: ".layout-drag-handle, .layout-lock-handle, button, input, select, textarea",
+          edges: {top: true, left: true, bottom: true, right: true},
+          modifiers: [
+            interact.modifiers.restrictEdges({outer: dashboardGrid}),
+            interact.modifiers.restrictSize({min: {width: 180, height: 120}})
+          ],
+          listeners: {
+            start() { widget.classList.add("layout-resizing"); widget.style.zIndex = "100"; document.getElementById("layoutStatus").textContent = "正在自由调整模块大小"; },
+            move(event) {
+              const current = layoutState.get(id);
+              applyFreeLayout(widget, {x: current.x + event.deltaRect.left, y: current.y + event.deltaRect.top, width: event.rect.width, height: event.rect.height});
+            },
+            end() { widget.classList.remove("layout-resizing"); widget.style.zIndex = ""; saveLayout(); document.getElementById("layoutStatus").textContent = "模块大小已更新"; }
+          }
+        });
+      layoutInteractors.set(id, interactable);
+    }
+
+    function initializeLayoutEditor() {
+      loadLayout();
+      dashboardGrid.classList.remove("grid");
+      dashboardGrid.classList.add("free-layout");
+      try {
+        const savedLocks = JSON.parse(localStorage.getItem(layoutLockedKey) || "[]");
+        if (Array.isArray(savedLocks)) savedLocks.forEach(id => layoutLocked.add(id));
+      } catch {}
+      const widgets = layoutItems.map(item => {
+        const widget = document.createElement("div");
+        widget.className = "free-layout-item";
+        widget.dataset.layoutWidget = item.dataset.layoutId;
+        const content = document.createElement("div");
+        content.className = "free-layout-item-content";
+        item.parentElement?.removeChild(item);
+        content.append(item);
+        widget.append(content);
+        dashboardGrid.append(widget);
+        applyFreeLayout(widget, layoutState.get(item.dataset.layoutId) || gridToFree(defaultLayout(item)));
+        return widget;
+      });
+      layoutItems.forEach(item => {
+        const drag = document.createElement("button");
+        drag.type = "button";
+        drag.className = "layout-drag-handle";
+        drag.textContent = "拖动";
+        drag.title = "拖动模块";
+        drag.setAttribute("aria-label", `拖动${item.querySelector("h2")?.textContent || "模块"}`);
+        const lock = document.createElement("button");
+        lock.type = "button";
+        lock.className = "layout-lock-handle";
+        lock.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); toggleLayoutLock(item); });
+        item.append(drag, lock);
+        updateLockButton(item);
+        setupInteract(document.querySelector(`[data-layout-widget="${item.dataset.layoutId}"]`), item);
+      });
+      document.getElementById("layoutResetBtn").addEventListener("click", restoreDefaultLayout);
+      setLayoutEditing(false);
+    }
+
+    async function initializePortfolio() {
+      const local = readLocalPortfolio();
+      document.getElementById("portfolioCash").value = local.cash;
+      renderHoldingEditor();
+      try {
+        const response = await fetch("/api/portfolio-state", {cache: "no-store"});
+        const data = await response.json();
+        if (data.state) {
+          portfolioVersion = data.state.version;
+          applyPortfolioState(data.state);
+        } else {
+          await persistPortfolioState();
+        }
+      } catch {
+        document.getElementById("portfolioStatus").textContent = "服务器同步暂不可用，当前使用本地数据";
+      }
+      setInterval(syncPortfolioState, 3000);
+      startLiveRefresh();
+      await analyzePortfolio({persist: false, silent: true, syncRisk: true});
+    }
+
+    // Expose layout actions for the toolbar's direct button handlers.
+    window.setLayoutEditing = setLayoutEditing;
+    window.saveLayoutSnapshot = saveLayoutSnapshot;
+    window.restoreDefaultLayout = restoreDefaultLayout;
+    document.getElementById("layoutEditBtn").addEventListener("click", () => setLayoutEditing(!layoutEditing));
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        syncPortfolioState();
+        refreshLiveData();
+      }
+    });
+    initializeLayoutEditor();
+    initializePortfolio();
+    evaluate();
+  </script>
+</body>
+</html>
