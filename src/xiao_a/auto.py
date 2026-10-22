@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
 
-from xiao_a.data.kline import EastmoneyKlineProvider, KlineResult, KlineRouter, TencentKlineProvider
+from xiao_a.data.kline import EastmoneyKlineProvider, KlineResult, KlineRouter, SinaKlineProvider, TencentKlineProvider
 from xiao_a.data.volume import SHANGHAI, trading_progress
 from xiao_a.data.fallback import BaostockKlineProvider, PytdxKlineProvider, PytdxQuoteProvider, SinaQuoteProvider
 from xiao_a.data.market import (
@@ -55,8 +55,11 @@ class AutoAnalyzer:
     ):
         self.quote_router = quote_router or QuoteRouter([TencentQuoteProvider(), SinaQuoteProvider(), PytdxQuoteProvider()])
         self.kline_provider = kline_provider or KlineRouter([
-            EastmoneyKlineProvider(priority=10),
-            TencentKlineProvider(priority=20),
+            # Tencent first: Eastmoney push2his is often unreachable from
+            # overseas networks; each failure costs a timeout.
+            TencentKlineProvider(priority=10),
+            EastmoneyKlineProvider(priority=20),
+            SinaKlineProvider(priority=25),
             PytdxKlineProvider(priority=30),
             BaostockKlineProvider(priority=40),
         ])

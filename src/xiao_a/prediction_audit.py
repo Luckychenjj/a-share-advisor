@@ -110,18 +110,41 @@ class PredictionLedger:
             count += 1
         return {"valid": True, "events": count, "head": previous}
 
+    def _file_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return (stat.st_size, stat.st_mtime_ns)
+
+    def _verified_head(self) -> tuple[str, int]:
+        """Return (head hash, event count) of a fully verified chain.
+
+        A full re-read and re-hash of the ledger on every append made bulk
+        settlement O(n^2) on large ledgers (minutes per run). The verified head
+        is cached against the file's size+mtime; any outside change to the
+        file invalidates the cache and forces a full verification again.
+        """
+        signature = self._file_signature()
+        cached = getattr(self, "_head_cache", None)
+        if cached is not None and signature is not None and cached[0] == signature:
+            return cached[1], cached[2]
+        check = self.integrity()
+        if not check["valid"]:
+            raise RuntimeError("预测台账哈希链异常；已停止追加和评分，请先人工复核原始文件")
+        head, count = (check.get("head") or "0" * 64), int(check["events"])
+        if signature is not None:
+            self._head_cache = (signature, head, count)
+        return head, count
+
     def append(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            existing = self.events()
-            check = self.integrity()
-            if not check["valid"]:
-                raise RuntimeError("预测台账哈希链异常；已停止追加和评分，请先人工复核原始文件")
-            previous = existing[-1].get("event_hash", "0" * 64) if existing else "0" * 64
+            previous, existing_count = self._verified_head()
             event = {
                 "event_id": str(uuid.uuid4()),
                 "event_type": event_type,
                 "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                "sequence": len(existing) + 1,
+                "sequence": existing_count + 1,
                 "previous_hash": previous,
                 **payload,
             }
@@ -130,6 +153,9 @@ class PredictionLedger:
                 handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            signature = self._file_signature()
+            if signature is not None:
+                self._head_cache = (signature, event["event_hash"], existing_count + 1)
             return event
 
     def records(self) -> list[dict[str, Any]]:

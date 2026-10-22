@@ -22,7 +22,7 @@ from xiao_a.data.router import ProviderResult
 
 from xiao_a.auto import AutoAnalyzer
 from xiao_a.backtest import AShareBacktester, moving_average_crossover_signals
-from xiao_a.data.kline import EastmoneyKlineProvider, KlineRouter, TencentKlineProvider
+from xiao_a.data.kline import EastmoneyKlineProvider, KlineResult, KlineRouter, SinaKlineProvider, TencentKlineProvider
 from xiao_a.data.fallback import BaostockKlineProvider, PytdxKlineProvider, PytdxQuoteProvider, SinaQuoteProvider
 from xiao_a.data.router import QuoteRouter
 from xiao_a.data.search import TencentStockSearchProvider
@@ -55,12 +55,14 @@ _QUOTE_CACHE_TTL = 0.35
 _VOLUME_BASELINE_PROVIDER = KlineRouter([
     TencentKlineProvider(priority=10),
     EastmoneyKlineProvider(priority=20),
+    SinaKlineProvider(priority=25),
     PytdxKlineProvider(priority=30),
     BaostockKlineProvider(priority=40),
 ])
 _BACKTEST_KLINE_PROVIDER = KlineRouter([
     TencentKlineProvider(priority=10),
     EastmoneyKlineProvider(priority=20),
+    SinaKlineProvider(priority=25),  # indices / unadjusted only; never stock qfq
 ])
 _VOLUME_BASELINE_CACHE: dict[tuple[str, date], tuple[float, float | None]] = {}
 _VOLUME_BASELINE_LOCK = threading.RLock()
@@ -836,6 +838,9 @@ def _position_aware_advice(action: str, holding_qty: int, sellable_qty: int | No
     return {"action": "hold", "suggested_buy_quantity": 0, "reason": "观察/持有，不新增仓位"}
 
 
+_SETTLEMENT_FETCH_WORKERS = max(1, int(os.environ.get("XIAO_A_SETTLE_WORKERS", "6")))
+
+
 def _settle_forward_predictions() -> dict:
     """Settle only completed future windows from qfq daily bars after cutoff."""
     records = _PREDICTION_LEDGER.records()
@@ -845,6 +850,35 @@ def _settle_forward_predictions() -> dict:
     stock_results = {}
     settled: list[str] = []
     pending_reasons: list[dict] = []
+    # Prefetch each distinct symbol's history concurrently. Fetching ~200+
+    # symbols one after another took minutes and outlived client timeouts;
+    # ledger writes below stay strictly sequential.
+    # A 5-session window strictly between the cutoff day and today needs at
+    # least 6 calendar days, so younger predictions cannot settle yet and their
+    # history is not downloaded (they still get the same "not complete" note).
+    def _maybe_due(item: dict) -> bool:
+        try:
+            raw_cutoff = datetime.fromisoformat(str(item["information_cutoff"]).replace("Z", "+00:00"))
+            if raw_cutoff.tzinfo is None:
+                raw_cutoff = raw_cutoff.replace(tzinfo=SHANGHAI)
+            return (today - raw_cutoff.astimezone(SHANGHAI).date()).days >= 6
+        except Exception:
+            return True  # let the main loop report the bad record
+    symbols = sorted({str(item.get("symbol")) for item in pending if item.get("symbol") and _maybe_due(item)})
+    if symbols:
+        def _fetch(symbol: str):
+            try:
+                return symbol, _BACKTEST_KLINE_PROVIDER.fetch_daily(symbol, limit=1000, adjustment="qfq")
+            except Exception as exc:  # router normally never raises; keep settlement going
+                return symbol, KlineResult([], DataStatus.UNAVAILABLE, errors=[f"{type(exc).__name__}: {exc}"])
+        with ThreadPoolExecutor(max_workers=_SETTLEMENT_FETCH_WORKERS) as pool:
+            for symbol, result in pool.map(_fetch, [*symbols, "SH.000300"]):
+                if symbol == "SH.000300" and symbol not in symbols:
+                    benchmark_result = result
+                else:
+                    stock_results[symbol] = result
+                    if symbol == "SH.000300":
+                        benchmark_result = result
     for record in pending:
         prediction_id = record["prediction_id"]
         # Settlement is an explicit user action. A failed fetch must not block
@@ -855,6 +889,8 @@ def _settle_forward_predictions() -> dict:
                 cutoff = cutoff.replace(tzinfo=SHANGHAI)
             cutoff_day = cutoff.astimezone(SHANGHAI).date()
             symbol = str(record["symbol"])
+            if int(record["target"].get("horizon_sessions") or 0) == 5 and (today - cutoff_day).days < 6:
+                raise RuntimeError("预测期限尚未完整，尚无5个已结束的后续交易日")
             if symbol not in stock_results:
                 stock_results[symbol] = _BACKTEST_KLINE_PROVIDER.fetch_daily(symbol, limit=1000, adjustment="qfq")
             stock_result = stock_results[symbol]

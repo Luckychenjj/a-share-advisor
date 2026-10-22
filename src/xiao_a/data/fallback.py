@@ -8,7 +8,9 @@ and can move to the next provider.
 from datetime import datetime, timezone
 from urllib.request import Request
 
-from xiao_a.data.http import open_market_url
+import threading
+
+from xiao_a.data.http import open_market_url, tcp_reachable
 from xiao_a.data.kline import KlineResult, _default_limit_rate
 from xiao_a.data.router import ProviderResult
 from xiao_a.data.symbols import normalize_symbol
@@ -37,6 +39,9 @@ class PytdxQuoteProvider:
         market = 1 if normalized.exchange == "SH" else 0
         last_error = None
         for host, port in self.servers:
+            if not tcp_reachable(host, port, timeout=3.0):
+                last_error = ConnectionError(f"pytdx server {host}:{port} unreachable (fast skip)")
+                continue
             api = TdxHq_API()
             try:
                 connected = api.connect(host, port, time_out=4)
@@ -136,6 +141,9 @@ class PytdxKlineProvider:
         market = TDXParams.MARKET_SH if normalized.exchange == "SH" else TDXParams.MARKET_SZ
         last_error = None
         for host, port in self.servers:
+            if not tcp_reachable(host, port, timeout=3.0):
+                last_error = ConnectionError(f"pytdx server {host}:{port} unreachable (fast skip)")
+                continue
             api = TdxHq_API()
             try:
                 connected = api.connect(host, port, time_out=4)
@@ -177,10 +185,36 @@ class PytdxKlineProvider:
 class BaostockKlineProvider:
     name = "baostock-kline-fallback"
 
-    def __init__(self, *, priority: int = 40):
+    def __init__(self, *, priority: int = 40, timeout: float = 20.0):
         self.priority = priority
+        self.timeout = timeout
 
     def fetch_daily(self, symbol: str, *, limit: int = 360) -> KlineResult:
+        # baostock opens a raw TCP socket (port 10030) with no timeout at all; on
+        # networks where that port is blackholed the call hung forever. Probe
+        # first, then run the query in a worker bounded by self.timeout.
+        from baostock.common import contants as cons
+
+        if not tcp_reachable(cons.BAOSTOCK_SERVER_IP, cons.BAOSTOCK_SERVER_PORT, timeout=3.0):
+            raise ConnectionError(f"baostock server {cons.BAOSTOCK_SERVER_IP}:{cons.BAOSTOCK_SERVER_PORT} unreachable (fast skip)")
+        box: dict = {}
+
+        def worker() -> None:
+            try:
+                box["result"] = self._fetch_daily_blocking(symbol, limit=limit)
+            except BaseException as exc:  # surfaced to the caller below
+                box["error"] = exc
+
+        thread = threading.Thread(target=worker, name="baostock-fetch", daemon=True)
+        thread.start()
+        thread.join(self.timeout)
+        if thread.is_alive():
+            raise TimeoutError(f"baostock did not answer within {self.timeout:.0f}s")
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
+
+    def _fetch_daily_blocking(self, symbol: str, *, limit: int = 360) -> KlineResult:
         import baostock as bs
 
         normalized = normalize_symbol(symbol)

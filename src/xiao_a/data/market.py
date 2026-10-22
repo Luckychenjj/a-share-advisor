@@ -16,8 +16,8 @@ from xiao_a.models import DataStatus, Provenance
 
 
 _URLS = (
-    "http://82.push2.eastmoney.com/api/qt/clist/get",
-    "http://push2.eastmoney.com/api/qt/clist/get",
+    # HTTPS only: plain HTTP (port 80) is blackholed on some networks.
+    "https://82.push2.eastmoney.com/api/qt/clist/get",
     "https://push2.eastmoney.com/api/qt/clist/get",
 )
 # Eastmoney's public web "ut" parameter (embedded in its public quote pages; not a

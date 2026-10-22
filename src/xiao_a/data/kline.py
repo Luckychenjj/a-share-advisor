@@ -13,7 +13,17 @@ from xiao_a.models import DailyBar, DataStatus, Provenance
 
 
 _BASE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-_EASTMONEY_URL = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
+# Same Tencent qfq daily-kline data behind a different front end. The
+# web.ifzq host intermittently answers with a WAF 501 page (notably when a
+# Referer is sent and for index symbols), so it is tried second.
+_TENCENT_KLINE_URLS = (
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get",
+    _BASE_URL,
+)
+# Plain HTTP (port 80) is unreachable from some networks and used to hang
+# settlement; always use HTTPS.
+_EASTMONEY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+_SINA_KLINE_URL = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 
 
 @dataclass
@@ -120,11 +130,21 @@ class TencentKlineProvider:
         if adjustment not in {"qfq", "none"}:
             raise ValueError("unsupported adjustment")
         param = f"{normalized.tencent},day,,,{limit},{'qfq' if adjustment == 'qfq' else ''}"
-        url = f"{_BASE_URL}?param={urlquote(param, safe=',')}"
-        request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
-        with open_market_url(request, timeout=self.timeout) as response:
-            payload = response.read().decode("utf-8", errors="replace")
-        return parse_tencent_kline_payload(payload, symbol, adjustment=adjustment)
+        last_error: Exception | None = None
+        for base_url in _TENCENT_KLINE_URLS:
+            url = f"{base_url}?param={urlquote(param, safe=',')}"
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with open_market_url(request, timeout=self.timeout) as response:
+                    payload = response.read().decode("utf-8", errors="replace")
+                result = parse_tencent_kline_payload(payload, symbol, adjustment=adjustment)
+            except Exception as exc:  # WAF page / timeout: try the next Tencent front end
+                last_error = exc
+                continue
+            if result.bars:
+                return result
+            last_error = ValueError("; ".join(result.warnings) or "Tencent returned no daily bars")
+        raise last_error or RuntimeError("Tencent kline unavailable")
 
 
 def parse_eastmoney_kline_payload(payload: str, requested_symbol: str, *, adjustment: str = "qfq") -> KlineResult:
@@ -206,6 +226,68 @@ class EastmoneyKlineProvider:
         with open_market_url(request, timeout=self.timeout) as response:
             payload = response.read().decode("utf-8", errors="replace")
         return parse_eastmoney_kline_payload(payload, symbol, adjustment=adjustment)
+
+
+def parse_sina_kline_payload(payload: str, requested_symbol: str) -> KlineResult:
+    normalized = normalize_symbol(requested_symbol)
+    text = payload.strip()
+    rows = json.loads(text) if text and text != "null" else []
+    clean_rows: list[tuple[date, float, float, float, float, float]] = []
+    for row in rows or []:
+        try:
+            trading_date = date.fromisoformat(str(row["day"])[:10])
+            open_price, close = float(row["open"]), float(row["close"])
+            high, low = float(row["high"]), float(row["low"])
+            # Sina reports shares; the app uses lots (手).
+            volume = float(row.get("volume") or 0) / 100
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(open_price, close, high, low) <= 0 or high < low:
+            continue
+        clean_rows.append((trading_date, open_price, high, low, close, volume))
+    if not clean_rows:
+        return KlineResult([], DataStatus.UNAVAILABLE, warnings=["Sina returned no daily bars"])
+    clean_rows.sort(key=lambda item: item[0])
+    bars: list[DailyBar] = []
+    previous_close: float | None = None
+    for trading_date, open_price, high, low, close, volume in clean_rows:
+        bars.append(DailyBar(
+            trading_date=trading_date, open=open_price, high=high, low=low, close=close,
+            volume=volume, previous_close=previous_close, suspended=volume <= 0,
+            limit_rate=_default_limit_rate(normalized, trading_date),
+        ))
+        previous_close = close
+    fetched_at = datetime.now(timezone.utc)
+    return KlineResult(
+        bars, DataStatus.FRESH,
+        Provenance("sina-kline", f"{_SINA_KLINE_URL}?symbol={normalized.tencent}&scale=240", fetched_at,
+                   datetime.combine(bars[-1].trading_date, datetime.min.time(), tzinfo=timezone.utc)),
+        warnings=[] if len(bars) >= 120 else [f"only {len(bars)} valid daily bars"],
+    )
+
+
+class SinaKlineProvider:
+    """HTTPS daily-bar fallback. Sina only serves unadjusted prices, so stocks
+    are served for adjustment="none" only; indices (no ex-rights) for both."""
+
+    name = "sina-kline"
+
+    def __init__(self, *, priority: int = 25, timeout: float = 8.0):
+        self.priority = priority
+        self.timeout = timeout
+
+    def fetch_daily(self, symbol: str, *, limit: int = 360, adjustment: str = "qfq") -> KlineResult:
+        normalized = normalize_symbol(symbol)
+        if adjustment not in {"qfq", "none"}:
+            raise ValueError("unsupported adjustment")
+        if adjustment == "qfq" and not is_market_index(symbol):
+            raise ValueError("Sina kline has no qfq prices for stocks")
+        limit = max(30, min(1000, int(limit)))
+        url = f"{_SINA_KLINE_URL}?symbol={normalized.tencent}&scale=240&ma=no&datalen={limit}"
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+        with open_market_url(request, timeout=self.timeout) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+        return parse_sina_kline_payload(payload, symbol)
 
 
 class KlineRouter:
