@@ -1,0 +1,13 @@
+# Pinned runtime deps (python 3.13), used by start.sh when it (re)builds .venv.
+# Regenerate: uv pip compile pyproject.toml --extra fallback-data --no-annotate -o requirements-lock.txt
+baostock==0.9.4
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.2
+numpy==2.5.4
+pandas==3.0.6
+pycparser==3.11
+pytdx==1.72
+python-dateutil==3.0.0
+six==1.17.0
+tzdata==2026.5

@@ -39,3 +39,6 @@ Installer/
 client/build/
 .DS_Store
 Thumbs.db
+.venv.*
+.runtime/
+.start-*.lock

@@ -70,6 +70,16 @@ xiao-a dashboard                # 或 python -m xiao_a.cli dashboard
 
 然后打开 `http://127.0.0.1:8765/`。
 
+### Linux / 服务器：一条命令自愈启动
+
+```bash
+./start.sh            # 已在运行且健康则什么都不做；否则检查 .venv，坏了/缺了就按 requirements-lock.txt 重建，再在后台启动
+./start.sh --check    # 只检查：环境是否可用、后端是否健康（退出码 0 = 健康）
+./start.sh --restart  # 强制重启；./start.sh --stop 停止
+```
+
+默认监听 `127.0.0.1:8768`（`XIAO_A_PORT` 可改），数据放在 `./userdata`（`XIAO_A_DATA_DIR` 可改）。适合机器重启或迁移后系统 Python / 已装依赖丢失的场景：重复执行是安全的；如果机器上没有 Python 3.11+，会用 [uv](https://github.com/astral-sh/uv) 把 Python 装到项目内的 `.runtime/python`。
+
 ## 个人数据与隐私
 
 持仓、现金、成交记录和预测台账都只保存在**你自己电脑的本地文件**里，不属于源码，也不应提交到 Git：
