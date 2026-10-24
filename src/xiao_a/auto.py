@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from threading import Lock
@@ -25,6 +27,31 @@ from xiao_a.market_prediction import independent_market_prediction
 from xiao_a.risk import RiskContext
 from xiao_a.strategies.chan import ChanStructureStrategy
 from xiao_a.strategies.core import CycleTrendStrategy, LeaderSentimentStrategy, MarketRegimeStrategy, MultiFactorStrategy
+
+
+# Independent data stages of one analysis run side by side, so a request costs
+# the slowest stage instead of the sum of all of them.  Optional supplemental
+# data (announcements, fund flow, limit-up pool) has its own time budget: when
+# it is slow the analysis continues without it rather than timing out whole.
+_STAGE_POOL = ThreadPoolExecutor(
+    max_workers=max(4, int(os.environ.get("XIAO_A_STAGE_WORKERS", "24"))),
+    thread_name_prefix="xiao-a-stage",
+)
+_SUPPLEMENTAL_BUDGET = float(os.environ.get("XIAO_A_SUPPLEMENTAL_BUDGET", "15"))
+
+
+def _empty_supplemental(status: DataStatus = DataStatus.UNAVAILABLE, warnings: list[str] | None = None,
+                        errors: list[str] | None = None) -> SupplementalResult:
+    return SupplementalResult(
+        {
+            "announcements": {"available": False, "count": 0, "items": [], "risk_flags": []},
+            "fund_flow": {"available": False},
+            "limit_up_pool": {"available": False, "count": None, "max_continuous": None, "selected": None, "top": []},
+        },
+        status,
+        warnings=warnings or [],
+        errors=errors or [],
+    )
 
 
 @dataclass
@@ -207,23 +234,34 @@ class AutoAnalyzer:
         *,
         include_supplemental: bool = True,
     ) -> AutoAnalysis:
-        quote_result: ProviderResult = self.quote_router.fetch_quote(symbol)
-        stock_result = self._safe_kline(symbol)
-        benchmark_result = self._benchmark()
-        market_result = self._market_breadth()
+        quote_future = _STAGE_POOL.submit(self.quote_router.fetch_quote, symbol)
+        stock_future = _STAGE_POOL.submit(self._safe_kline, symbol)
+        benchmark_future = _STAGE_POOL.submit(self._benchmark)
+        market_future = _STAGE_POOL.submit(self._market_breadth)
+        supplemental_future = None
         if include_supplemental and is_market_index(symbol):
-            supplemental_result = self.supplemental_provider.fetch_market_limit_up_pool(symbol)
+            supplemental_future = _STAGE_POOL.submit(self.supplemental_provider.fetch_market_limit_up_pool, symbol)
         elif include_supplemental:
-            supplemental_result = self._supplemental(symbol)
+            supplemental_future = _STAGE_POOL.submit(self._supplemental, symbol)
+        quote_result: ProviderResult = quote_future.result()
+        stock_result = stock_future.result()
+        benchmark_result = benchmark_future.result()
+        market_result = market_future.result()
+        if supplemental_future is None:
+            supplemental_result = _empty_supplemental()
         else:
-            supplemental_result = SupplementalResult(
-                {
-                    "announcements": {"available": False, "count": 0, "items": [], "risk_flags": []},
-                    "fund_flow": {"available": False},
-                    "limit_up_pool": {"available": False, "count": None, "max_continuous": None, "selected": None, "top": []},
-                },
-                DataStatus.UNAVAILABLE,
-            )
+            try:
+                supplemental_result = supplemental_future.result(timeout=_SUPPLEMENTAL_BUDGET)
+            except FutureTimeout:
+                supplemental_result = _empty_supplemental(
+                    warnings=[f"公告、资金流和涨停池数据超过 {_SUPPLEMENTAL_BUDGET:.0f} 秒未返回，本次不参与判断"],
+                    errors=["supplemental: timed out"],
+                )
+            except Exception as exc:
+                supplemental_result = _empty_supplemental(
+                    warnings=["公告、资金流和涨停池数据暂不可用，相关信息不参与判断"],
+                    errors=[f"{type(exc).__name__}: {exc}"],
+                )
         if not stock_result.bars:
             details = "; ".join([*stock_result.errors, *stock_result.warnings]) or "unknown provider failure"
             raise RuntimeError(f"无法取得历史日线：{details}")

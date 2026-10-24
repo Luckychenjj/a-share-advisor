@@ -609,6 +609,45 @@ def _volume_price_relation(price: float | None, previous_close: float | None, ra
     return "量价平稳"
 
 
+def _holding_daily_profit(symbol: str, quantity: int, quote: Quote, state: dict) -> dict:
+    """Today's P&L for one holding.
+
+    Shares carried over from yesterday move from the previous close; shares
+    bought today move from their own fill price.  Using the previous close for
+    a same-day buy would count yesterday-to-fill movement the account never had.
+    """
+    empty = {"daily_profit": None, "daily_profit_pct": None, "bought_today_quantity": None}
+    previous_close = quote.previous_close
+    if not previous_close or previous_close <= 0 or quantity <= 0:
+        return {**empty, "bought_today_quantity": 0} if quantity <= 0 else empty
+    as_of = quote.provenance.as_of if quote.provenance else None
+    session = (as_of.astimezone(SHANGHAI) if as_of and as_of.tzinfo else (as_of or datetime.now(SHANGHAI))).date().isoformat()
+    buys = _PORTFOLIO_STORE.buys_on(symbol, session, state=state)
+    if buys is None:
+        return empty
+    remaining = quantity
+    profit = 0.0
+    basis = 0.0
+    bought = 0
+    # Shares bought today cannot be sold today (T+1), so they are all still held;
+    # cap at the current quantity in case the history and holdings disagree.
+    for buy_quantity, buy_price in buys:
+        used = min(buy_quantity, remaining)
+        if used <= 0:
+            break
+        profit += (quote.price - buy_price) * used
+        basis += buy_price * used
+        bought += used
+        remaining -= used
+    profit += (quote.price - previous_close) * remaining
+    basis += previous_close * remaining
+    return {
+        "daily_profit": profit,
+        "daily_profit_pct": profit / basis if basis > 0 else None,
+        "bought_today_quantity": bought,
+    }
+
+
 def _live_portfolio(state: dict) -> dict:
     holdings = state.get("holdings", [])
 
@@ -660,10 +699,7 @@ def _live_portfolio(state: dict) -> dict:
             "volume_ratio": volume_ratio,
             "volume_relation": _volume_price_relation(quote.price, quote.previous_close, volume_ratio),
             "market_value": market_value,
-            "daily_profit": ((quote.price - quote.previous_close) * quantity
-                             if quote.previous_close and quote.previous_close > 0 else None),
-            "daily_profit_pct": (quote.price / quote.previous_close - 1.0
-                                 if quote.previous_close and quote.previous_close > 0 else None),
+            **_holding_daily_profit(symbol, quantity, quote, state),
             "profit": ((quote.price - average_cost) * quantity
                        if average_cost is not None else None),
             "status": result.status.value,
@@ -944,7 +980,41 @@ def _settle_forward_predictions() -> dict:
     return {"settled_count": len(settled), "settled_ids": settled, "pending_count": len(pending) - len(settled), "pending_reasons": pending_reasons}
 
 
+def _annotate_offline_fallback(cached: dict, live_payload, live_status: int) -> dict:
+    """Make a cached answer impossible to mistake for a fresh one.
+
+    The cached copy keeps its original quote timestamps, so a caller that only
+    reads the price would otherwise report an old price as current.
+    """
+    live_error = None
+    if isinstance(live_payload, dict):
+        live_error = live_payload.get("error") or (
+            "实时数据不可用" if live_payload.get("status") == "unavailable" else None)
+    cached_local = None
+    try:
+        cached_local = datetime.fromisoformat(str(cached.get("cached_at"))).astimezone(SHANGHAI)
+    except (TypeError, ValueError):
+        pass
+    when = cached_local.strftime("%m-%d %H:%M") if cached_local else "更早"
+    notice = f"实时分析失败，以下是 {when}（北京时间）的缓存结果，价格和结论都不是最新的"
+    cached["status"] = "stale"
+    cached["live_error"] = live_error or f"HTTP {live_status}"
+    cached["live_status_code"] = live_status
+    cached["cached_at_local"] = cached_local.isoformat() if cached_local else None
+    cached["stale_notice"] = notice
+    warnings = [item for item in cached.get("warnings", []) if item != notice]
+    cached["warnings"] = [notice, *warnings]
+    return cached
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
+    def _live_only(self) -> bool:
+        """Callers that must never get cached answers send X-Xiao-A-Live-Only: 1."""
+        try:
+            return str(self.headers.get("X-Xiao-A-Live-Only", "")).strip().lower() in {"1", "true", "yes"}
+        except AttributeError:
+            return False
+
     def _try_remote(self, method: str, path: str, payload=None) -> bool:
         self._cache_request = (method, path, payload) if _HYBRID_GATEWAY.supported(method, urlparse(path).path) else None
         if not self._cache_request or not _HYBRID_GATEWAY.cloud_url:
@@ -992,14 +1062,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _HYBRID_GATEWAY.save(*cache_request, payload)
                 except OSError:
                     pass  # A read-only/full disk must not hide a successful live result.
-            else:
+            elif not self._live_only():
                 cached = _HYBRID_GATEWAY.fallback(*cache_request)
                 if cached is not None:
-                    payload, status = cached, 200
+                    payload, status = _annotate_offline_fallback(cached, payload, status), 200
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        if isinstance(payload, dict) and payload.get("offline"):
+            # Machine clients can detect a cached answer without parsing the body.
+            self.send_header("X-Xiao-A-Offline", "1")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

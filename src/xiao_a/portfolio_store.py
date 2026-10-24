@@ -259,6 +259,36 @@ class PortfolioStore:
         opening_quantity = int((opening or {}).get("quantity") or 0)
         return max(0, min(quantity - bought_today, opening_quantity - sold_today))
 
+    def buys_on(self, symbol: str, session: str, *, state: dict[str, Any] | None = None) -> list[tuple[int, float]] | None:
+        """Return (quantity, price) for each buy of ``symbol`` on ``session`` (Shanghai date).
+
+        None means the transaction history is malformed and the split is unknown.
+        """
+        current = state if state is not None else self.load()
+        if not isinstance(current, dict):
+            return None
+        transactions = current.get("transactions", [])
+        if not isinstance(transactions, list):
+            return None
+        bare = self._bare_symbol(symbol)
+        buys: list[tuple[int, float]] = []
+        try:
+            for transaction in transactions:
+                if transaction.get("side") != "buy" or self._bare_symbol(transaction.get("symbol", "")) != bare:
+                    continue
+                when = datetime.fromisoformat(str(transaction["time"]).replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat() != session:
+                    continue
+                quantity = int(transaction.get("quantity") or 0)
+                price = float(transaction["price"])
+                if quantity > 0 and price > 0:
+                    buys.append((quantity, price))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        return buys
+
     @staticmethod
     def _bare_symbol(value: Any) -> str:
         return str(value).strip().upper().replace("SH.", "").replace("SZ.", "").replace("BJ.", "")
