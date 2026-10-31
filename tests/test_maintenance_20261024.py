@@ -44,7 +44,7 @@ class OfflineFallbackIsExplicit(unittest.TestCase):
     def test_cached_auto_evaluate_says_it_is_stale_and_why(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = HybridGateway(Path(directory), cloud_url="")
-            payload = {"symbol": "300502"}
+            payload = {"symbol": "300750"}
             cache.save("POST", "/api/auto-evaluate", payload, {"decision": {"executable": True}, "status": "fresh"})
             with _Server() as base, patch("xiao_a.dashboard._HYBRID_GATEWAY", cache), \
                     patch("xiao_a.dashboard._AUTO_ANALYZER.analyze", side_effect=RuntimeError("kline down")):
@@ -62,7 +62,7 @@ class OfflineFallbackIsExplicit(unittest.TestCase):
     def test_live_only_header_returns_the_real_error(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = HybridGateway(Path(directory), cloud_url="")
-            payload = {"symbol": "300502"}
+            payload = {"symbol": "300750"}
             cache.save("POST", "/api/auto-evaluate", payload, {"decision": {}, "status": "fresh"})
             with _Server() as base, patch("xiao_a.dashboard._HYBRID_GATEWAY", cache), \
                     patch("xiao_a.dashboard._AUTO_ANALYZER.analyze", side_effect=RuntimeError("kline down")):
@@ -77,17 +77,17 @@ class OfflineFallbackIsExplicit(unittest.TestCase):
 class SameDayBuyDailyProfit(unittest.TestCase):
     def _quote(self, price, previous_close):
         now = datetime.now(SHANGHAI)
-        return Quote("SZ.300502", "测试", price, previous_close, status=DataStatus.FRESH,
+        return Quote("SZ.300750", "测试", price, previous_close, status=DataStatus.FRESH,
                      provenance=Provenance("test", "local:test", now, now))
 
     def test_today_buy_counts_from_fill_price_not_previous_close(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PortfolioStore(Path(directory) / "p.json")
-            store.save([{"symbol": "300502", "quantity": 100, "average_cost": 9.0}], 100000)
-            store.apply_trade("300502", "buy", 200, 10.5, 0.0003)
+            store.save([{"symbol": "300750", "quantity": 100, "average_cost": 9.0}], 100000)
+            store.apply_trade("300750", "buy", 200, 10.5, 0.0003)
             state = store.load()
             with patch("xiao_a.dashboard._PORTFOLIO_STORE", store):
-                row = dashboard._holding_daily_profit("300502", 300, self._quote(11.0, 10.0), state)
+                row = dashboard._holding_daily_profit("300750", 300, self._quote(11.0, 10.0), state)
             # 100 carried shares: +1.0 each; 200 bought today at 10.5: +0.5 each.
             self.assertAlmostEqual(row["daily_profit"], 100 * 1.0 + 200 * 0.5)
             self.assertEqual(row["bought_today_quantity"], 200)
@@ -96,9 +96,9 @@ class SameDayBuyDailyProfit(unittest.TestCase):
     def test_carried_position_is_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PortfolioStore(Path(directory) / "p.json")
-            state = store.save([{"symbol": "300502", "quantity": 100, "average_cost": 9.0}], 0)
+            state = store.save([{"symbol": "300750", "quantity": 100, "average_cost": 9.0}], 0)
             with patch("xiao_a.dashboard._PORTFOLIO_STORE", store):
-                row = dashboard._holding_daily_profit("300502", 100, self._quote(11.0, 10.0), state)
+                row = dashboard._holding_daily_profit("300750", 100, self._quote(11.0, 10.0), state)
             self.assertAlmostEqual(row["daily_profit"], 100.0)
             self.assertAlmostEqual(row["daily_profit_pct"], 0.1)
             self.assertEqual(row["bought_today_quantity"], 0)
@@ -106,10 +106,10 @@ class SameDayBuyDailyProfit(unittest.TestCase):
     def test_buys_from_other_days_are_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PortfolioStore(Path(directory) / "p.json")
-            state = store.save([{"symbol": "300502", "quantity": 100, "average_cost": 9.0}], 0)
+            state = store.save([{"symbol": "300750", "quantity": 100, "average_cost": 9.0}], 0)
             yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-            state["transactions"] = [{"time": yesterday, "symbol": "300502", "side": "buy", "quantity": 100, "price": 9.0}]
-            self.assertEqual(store.buys_on("300502", datetime.now(SHANGHAI).date().isoformat(), state=state), [])
+            state["transactions"] = [{"time": yesterday, "symbol": "300750", "side": "buy", "quantity": 100, "price": 9.0}]
+            self.assertEqual(store.buys_on("300750", datetime.now(SHANGHAI).date().isoformat(), state=state), [])
 
 
 class _SlowAnalyzerParts:
@@ -147,7 +147,7 @@ class AnalysisStagesRunInParallel(unittest.TestCase):
         analyzer.supplemental_provider.fetch = slow_supplemental
         with patch.object(auto_module, "_SUPPLEMENTAL_BUDGET", 0.5):
             started = time.monotonic()
-            result = analyzer.analyze("300502")
+            result = analyzer.analyze("300750")
             elapsed = time.monotonic() - started
         # Serial would be ~0.6 * 3 (+ benchmark) + 3s supplemental.
         self.assertLess(elapsed, 2.0)
