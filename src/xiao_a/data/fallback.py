@@ -30,7 +30,7 @@ class PytdxQuoteProvider:
 
     def __init__(self, *, priority: int = 30, servers: tuple[tuple[str, int], ...] | None = None):
         self.priority = priority
-        self.servers = servers or (("119.147.212.81", 7709), ("114.80.63.12", 7709))
+        self.servers = servers or (("60.191.117.167", 7709), ("180.153.18.170", 7709), ("119.147.212.81", 7709), ("114.80.63.12", 7709))
 
     def fetch_quote(self, symbol: str) -> ProviderResult:
         from pytdx.hq import TdxHq_API
@@ -131,7 +131,7 @@ class PytdxKlineProvider:
 
     def __init__(self, *, priority: int = 30, servers: tuple[tuple[str, int], ...] | None = None):
         self.priority = priority
-        self.servers = servers or (("119.147.212.81", 7709), ("114.80.63.12", 7709))
+        self.servers = servers or (("60.191.117.167", 7709), ("180.153.18.170", 7709), ("119.147.212.81", 7709), ("114.80.63.12", 7709))
 
     def fetch_daily(self, symbol: str, *, limit: int = 360) -> KlineResult:
         from pytdx.hq import TdxHq_API

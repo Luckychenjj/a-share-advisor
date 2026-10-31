@@ -1184,6 +1184,7 @@
       const announcements = data.announcements || {};
       const fundFlow = data.fund_flow || {};
       const limitUp = data.limit_up_pool || {};
+      const micro = data.microstructure || {};
       const signedAmount = value => value == null ? "—" : (Number(value) >= 0 ? "+" : "-") + fmtAmount(Math.abs(Number(value)));
       const announcementItems = (announcements.items || []).slice(0, 4);
       const topLimitUp = (limitUp.top || []).slice(0, 5);
@@ -1191,6 +1192,23 @@
       const selectedText = selected
         ? "已在涨停池：" + (selected.name || selected.symbol) + (selected.continuous ? "，" + selected.continuous + "连板" : "") + (selected.reason ? "；" + selected.reason : "")
         : (limitUp.available ? "当前股票未进入今日涨停池" : "暂不可用");
+      const minute = micro.minute || null;
+      const ticks = micro.ticks || null;
+      const orderBook = micro.order_book || null;
+      const minuteText = minute
+        ? `开 ${Number(minute.open).toFixed(2)} → 收 ${Number(minute.last).toFixed(2)}；高 ${Number(minute.high).toFixed(2)} / 低 ${Number(minute.low).toFixed(2)}` +
+          (minute.change_pct_vs_open == null ? "" : `；较开盘 ${Number(minute.change_pct_vs_open) >= 0 ? "+" : ""}${Number(minute.change_pct_vs_open).toFixed(2)}%`) +
+          `；${minute.points || 0} 个分时点`
+        : (micro.available ? "分时摘要暂无" : "微观行情暂不可用");
+      const tickText = ticks
+        ? `近端取样 ${ticks.count} 笔：买量 ${Math.round(ticks.buy_vol || 0)} / 卖量 ${Math.round(ticks.sell_vol || 0)}` +
+          (ticks.recent && ticks.recent.length
+            ? "；最近 " + ticks.recent.slice(-3).map(t => `${t.time||""} ${t.side||""} ${Number(t.price).toFixed(2)}×${t.vol}`).join("，")
+            : "")
+        : "";
+      const bookText = orderBook && orderBook.levels
+        ? "五档 " + orderBook.levels.slice(0, 3).map(l => `买${l.level} ${l.bid ?? "—"} / 卖${l.level} ${l.ask ?? "—"}`).join("；")
+        : (micro.available ? "五档休市或未返回（开盘后复测）" : "");
       box.className = "supplemental-grid";
       box.innerHTML = [
         '<div class="supplemental-block"><div class="supplemental-title"><span>公告</span><span class="supplemental-meta">' + (announcements.available ? (announcements.count || 0) + "条" : "暂不可用") + '</span></div>',
@@ -1198,16 +1216,23 @@
           ? '<ul class="supplemental-list">' + announcementItems.map(item => "<li>" + escapeHtml(item.date || "") + " " + escapeHtml(item.title || "") + "</li>").join("") + "</ul>"
           : '<div class="supplemental-meta">' + (announcements.available ? "近45天暂无公告" : "公告接口暂不可用") + "</div>",
         "</div>",
-        '<div class="supplemental-block"><div class="supplemental-title"><span>资金流</span><span class="supplemental-meta">' + (fundFlow.trade_date || (fundFlow.available ? "今日" : "暂不可用")) + "</span></div>",
+        '<div class="supplemental-block"><div class="supplemental-title"><span>资金流</span><span class="supplemental-meta">' + (fundFlow.trade_date || (fundFlow.available ? "今日" : "暂不可用")) + '</span></div>',
         fundFlow.available
-          ? '<div class="' + (Number(fundFlow.main_net_inflow) >= 0 ? "positive" : "negative") + '">' + escapeHtml(fundFlow.trend || "") + " " + signedAmount(fundFlow.main_net_inflow) + "；近5日 " + signedAmount(fundFlow.five_day_net_inflow) + "</div>"
+          ? '<div class="' + (Number(fundFlow.main_net_inflow) >= 0 ? "positive" : "negative") + '">' + escapeHtml(fundFlow.trend || "") + " " + signedAmount(fundFlow.main_net_inflow) + "；近5日 " + signedAmount(fundFlow.five_day_net_inflow) + "</div>" +
+            '<div class="supplemental-meta">' + escapeHtml(fundFlow.source_label || "估算口径 · 来源见标注") + "</div>"
           : '<div class="supplemental-meta">资金流接口暂不可用</div>',
         "</div>",
-        '<div class="supplemental-block"><div class="supplemental-title"><span>涨停池</span><span class="supplemental-meta">' + (limitUp.available ? (limitUp.count || 0) + "只" + (limitUp.max_continuous ? "，最高" + limitUp.max_continuous + "板" : "") : "暂不可用") + "</span></div>",
-        '<div class="supplemental-meta">' + escapeHtml(selectedText) + "</div>",
+        '<div class="supplemental-block"><div class="supplemental-title"><span>分时 / 分笔</span><span class="supplemental-meta">' + (micro.trade_date || (micro.available ? (micro.mode || "已取") : "暂不可用")) + '</span></div>',
+        '<div>' + escapeHtml(minuteText) + '</div>',
+        tickText ? '<div class="supplemental-meta">' + escapeHtml(tickText) + '</div>' : '',
+        bookText ? '<div class="supplemental-meta">' + escapeHtml(bookText) + '</div>' : '',
+        '<div class="supplemental-meta">' + escapeHtml(micro.source_label || (micro.available ? "通达信(pytdx)" : "")) + '</div>',
+        "</div>",
+        '<div class="supplemental-block"><div class="supplemental-title"><span>涨停池</span><span class="supplemental-meta">' + (limitUp.available ? (limitUp.count || 0) + "只" + (limitUp.max_continuous ? "，最高" + limitUp.max_continuous + "板" : "") : "暂不可用") + '</span></div>',
+        '<div class="supplemental-meta">' + escapeHtml(selectedText) + '</div>',
         topLimitUp.length ? '<ul class="supplemental-list">' + topLimitUp.map(item => "<li>" + escapeHtml(item.name || item.symbol || "") + (item.continuous ? " · " + item.continuous + "板" : "") + (item.reason ? " · " + escapeHtml(item.reason) : "") + "</li>").join("") + "</ul>" : "",
         "</div>",
-        '<div class="supplemental-meta">公告与资金流按个股读取；涨停池为当日全市场快照。数据仅作证据，不替代风控规则。</div>'
+        '<div class="supplemental-meta">公告、资金流、分时/分笔按个股读取；涨停池为当日全市场快照。资金流为估算口径；分时来自通达信镜像。数据仅作证据，不替代风控规则。</div>'
       ].join("");
     }
 

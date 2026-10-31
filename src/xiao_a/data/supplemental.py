@@ -25,6 +25,7 @@ _FUND_FLOW_URLS = (
 _FUND_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 _POOL_DETAIL_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
 _CLS_FUND_URL = "https://x-quote.cls.cn/quote/stock/fundflow"
+_SINA_MONEYFLOW_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
 _FUND_FLOW_URL = _FUND_FLOW_URLS[0]
 _LIMIT_UP_URL = "https://x-quote.cls.cn/quote/index/up_down_analysis"
 _LIMIT_UP_PARAMS = {
@@ -131,7 +132,7 @@ def parse_fund_flow_payload(payload: str, *, source_url: str = _FUND_FLOW_URL) -
     signal = max(-1.0, min(1.0, latest_main / 300_000_000.0))
     return {
         "available": True,
-        "source_label": "东方财富 · 按订单大小统计，不代表机构真实账户流向",
+        "source_label": "东方财富 · 估算口径（按订单大小归类主力/超大单等），不代表机构真实账户流向",
         "source_url": source_url,
         "trade_date": latest["date"],
         "main_net_inflow": latest_main,
@@ -156,7 +157,7 @@ def parse_cls_fund_flow(payload: str, *, source_url: str = _CLS_FUND_URL) -> tup
     if main is None:
         raise ValueError("CLS main fund-flow missing")
     result = {"available": True, "trade_date": as_of.date().isoformat(),
-              "source_label": "财联社 · 资金流为供应商统计口径，不代表机构真实账户流向",
+              "source_label": "财联社 · 估算口径（供应商按订单大小统计），不代表机构真实账户流向",
               "source_url": source_url,
               "main_net_inflow": main, "five_day_net_inflow": _float(data.get("main_fund_5")),
               "super_large_inflow": _float(data.get("super_fund_diff")),
@@ -166,6 +167,60 @@ def parse_cls_fund_flow(payload: str, *, source_url: str = _CLS_FUND_URL) -> tup
               "signal": max(-1.0, min(1.0, main / 300_000_000.0)),
               "trend": "主力净流入" if main > 0 else "主力净流出" if main < 0 else "主力资金接近平衡"}
     return result, Provenance("cailian-fund-flow", source_url, _source_time(), as_of)
+
+
+
+def parse_sina_moneyflow_payload(payload: str, *, source_url: str = _SINA_MONEYFLOW_URL) -> tuple[dict, Provenance]:
+    """Parse Sina MoneyFlow daily rows (估算口径：净流入 / 超大单净额)."""
+    raw = json.loads(payload)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("Sina MoneyFlow returned no rows")
+    parsed: list[dict] = []
+    for row in raw:
+        trade_date = str(row.get("opendate") or "").strip()
+        main = _float(row.get("netamount"))
+        if not trade_date or main is None:
+            continue
+        parsed.append({
+            "date": trade_date,
+            "main_net_inflow": main,
+            "super_large_inflow": _float(row.get("r0_net")),
+            "large_inflow": None,
+            "medium_inflow": None,
+            "small_inflow": None,
+        })
+    parsed = sorted({item["date"]: item for item in parsed}.values(), key=lambda item: item["date"])
+    if not parsed:
+        raise ValueError("Sina MoneyFlow rows unusable")
+    latest = parsed[-1]
+    five = parsed[-5:]
+    five_day = sum(item["main_net_inflow"] for item in five) if len(five) == 5 else None
+    latest_main = latest["main_net_inflow"]
+    return {
+        "available": True,
+        "source_label": "新浪财经 · 估算口径（MoneyFlow 净流入/超大单），不代表机构真实账户流向",
+        "source_url": source_url,
+        "trade_date": latest["date"],
+        "main_net_inflow": latest_main,
+        "five_day_net_inflow": five_day,
+        "super_large_inflow": latest.get("super_large_inflow"),
+        "large_inflow": None,
+        "medium_inflow": None,
+        "small_inflow": None,
+        "signal": max(-1.0, min(1.0, latest_main / 300_000_000.0)),
+        "trend": "主力净流入" if latest_main > 0 else "主力净流出" if latest_main < 0 else "主力资金接近平衡",
+        "history": [
+            {
+                "date": item["date"],
+                "main_net_inflow": item["main_net_inflow"],
+                "small_inflow": None,
+                "medium_inflow": None,
+                "large_inflow": None,
+                "super_large_inflow": item.get("super_large_inflow"),
+            }
+            for item in five
+        ],
+    }, Provenance("sina-moneyflow", source_url, _source_time(), datetime.fromisoformat(latest["date"]).replace(tzinfo=SHANGHAI))
 
 
 def parse_limit_up_payload(payload: str, *, symbol: str, source_url: str = _LIMIT_UP_URL) -> tuple[dict, Provenance]:
@@ -229,9 +284,26 @@ class SupplementalDataProvider:
                 referer="https://www.cls.cn/", timeout=min(self.timeout, 3)),
                 source_url=f"{_CLS_FUND_URL}?{urlencode(params)}")
         except Exception:
+            pass
+        try:
             # Use the complete EM observation, never mix providers' daily or
             # multi-day amounts because order-classification definitions differ.
             return self._eastmoney_fund_flow(symbol)
+        except Exception:
+            return self._sina_fund_flow(symbol)
+
+    def _sina_fund_flow(self, symbol: str) -> tuple[dict, Provenance]:
+        normalized = normalize_symbol(symbol)
+        params = {"page": 1, "num": 10, "sort": "opendate", "asc": 0, "daima": normalized.tencent}
+        payload = self._get_json(
+            _SINA_MONEYFLOW_URL, params,
+            referer="https://finance.sina.com.cn/", timeout=min(self.timeout, 4),
+        )
+        return parse_sina_moneyflow_payload(payload, source_url=f"{_SINA_MONEYFLOW_URL}?{urlencode(params)}")
+
+    def _microstructure(self, symbol: str) -> tuple[dict, Provenance]:
+        from xiao_a.data.pytdx_micro import PytdxMicroProvider
+        return PytdxMicroProvider().fetch(symbol)
 
     def _eastmoney_fund_flow(self, symbol: str) -> tuple[dict, Provenance]:
         normalized = normalize_symbol(symbol)
@@ -325,6 +397,7 @@ class SupplementalDataProvider:
             "announcements": {"available": False, "count": 0, "items": [], "risk_flags": []},
             "fund_flow": {"available": False},
             "limit_up_pool": {"available": False, "count": None, "max_continuous": None, "selected": None, "top": []},
+            "microstructure": {"available": False},
         }
         provenances: list[Provenance] = []
         warnings: list[str] = []
@@ -333,21 +406,31 @@ class SupplementalDataProvider:
             "公告": self._announcements,
             "资金流": self._fund_flow,
             "涨停池": self._limit_up_pool,
+            "微观行情": self._microstructure,
         }
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        label_to_key = {
+            "公告": "announcements",
+            "资金流": "fund_flow",
+            "涨停池": "limit_up_pool",
+            "微观行情": "microstructure",
+        }
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(fetcher, symbol): label for label, fetcher in tasks.items()}
             for future in as_completed(futures):
                 label = futures[future]
                 try:
                     value, provenance = future.result()
-                    key = {"公告": "announcements", "资金流": "fund_flow", "涨停池": "limit_up_pool"}[label]
-                    data[key] = value
+                    data[label_to_key[label]] = value
                     provenances.append(provenance)
                 except Exception as exc:
                     warnings.append(f"{label}数据暂不可用，相关信息不参与判断")
                     errors.append(f"{label}: {type(exc).__name__}: {exc}")
         available_count = sum(bool(value.get("available")) for value in data.values())
-        status = DataStatus.FRESH if available_count == 3 else DataStatus.PARTIAL if available_count else DataStatus.UNAVAILABLE
+        status = (
+            DataStatus.FRESH if available_count == len(data)
+            else DataStatus.PARTIAL if available_count
+            else DataStatus.UNAVAILABLE
+        )
         return SupplementalResult(data, status, provenances, warnings, errors)
 
     def fetch_market_limit_up_pool(self, symbol: str) -> SupplementalResult:
@@ -356,6 +439,7 @@ class SupplementalDataProvider:
             "announcements": {"available": False, "count": 0, "items": [], "risk_flags": []},
             "fund_flow": {"available": False},
             "limit_up_pool": {"available": False, "count": None, "max_continuous": None, "selected": None, "top": []},
+            "microstructure": {"available": False},
         }
         try:
             data["limit_up_pool"], provenance = self._limit_up_pool(symbol)

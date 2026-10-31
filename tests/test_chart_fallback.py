@@ -32,8 +32,9 @@ class ChartFallbackTests(unittest.TestCase):
     def test_total_intraday_failure_is_chinese_and_daily_survives(self):
         daily = SimpleNamespace(bars=[{'close': 389}], warnings=[], status='fresh', provenance=None)
         with patch.object(dashboard._VOLUME_BASELINE_PROVIDER, 'fetch_daily', return_value=daily), \
-                patch.object(dashboard, 'open_market_url', side_effect=ConnectionError('closed')):
+                patch.object(dashboard, 'open_market_url', side_effect=ConnectionError('closed')), \
+                patch('xiao_a.data.pytdx_micro.PytdxMicroProvider.fetch_chart_minutes', side_effect=ConnectionError('closed')):
             result = dashboard._chart_payload('300750')
         self.assertEqual(result['daily'], [{'close': 389}])
         self.assertEqual(result['intraday'], [])
-        self.assertEqual(result['warnings'], ['分时数据暂不可用，已尝试东方财富和腾讯接口；K线仍可查看'])
+        self.assertEqual(result['warnings'], ['分时数据暂不可用，已尝试东方财富、腾讯和通达信；K线仍可查看'])

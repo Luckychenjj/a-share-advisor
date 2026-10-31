@@ -522,12 +522,21 @@ def _chart_payload(symbol: str) -> dict:
                 intraday_source = "tencent-intraday"
         except Exception as exc:
             intraday_error = f"{type(exc).__name__}: {exc}"
+    if not intraday:
+        try:
+            from xiao_a.data.pytdx_micro import PytdxMicroProvider
+            points, _trade_day, _host = PytdxMicroProvider().fetch_chart_minutes(symbol)
+            if points:
+                intraday.extend(points)
+                intraday_source = "pytdx-history-minute"
+        except Exception as exc:
+            intraday_error = f"{type(exc).__name__}: {exc}"
     return {
         "symbol": symbol,
         "daily": daily_result.bars,
         "intraday": intraday,
         "status": daily_result.status,
-        "warnings": [*daily_result.warnings, *(["分时数据暂不可用，已尝试东方财富和腾讯接口；K线仍可查看"] if intraday_error and not intraday else [])],
+        "warnings": [*daily_result.warnings, *(["分时数据暂不可用，已尝试东方财富、腾讯和通达信；K线仍可查看"] if intraday_error and not intraday else [])],
         "sources": [item for item in [
             daily_result.provenance.source if daily_result.provenance else None,
             intraday_source,
