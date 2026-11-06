@@ -147,6 +147,30 @@ PYTHONPATH=src python -m xiao_a.cli research weekly-review \
 
 周回顾在非重叠日期块少于 24 时不给方向命中率。概率不可用。单因子假设保持未应用。不要把 `study/` 提交进仓库。
 
+## 相对沪深300与市场状态
+
+这两项只属于 `research-study-v2`。已有的 v1 清单不会被改写。过去的交易日也不能补成前瞻研究。规则在抽样前固定：沪深300收盘高于包含当日的20日简单均线，并且5日收盘收益大于0，为强；两者都严格小于为弱；其余已核实的情况为震荡，相等算震荡。指数历史不足、来源未核实，或快照里有截止日之后的K线，就拒绝或记为不可用，不会当成震荡，也不从 `market_regime` 分数推断。
+
+相对目标仍是下一交易日开盘到第五个交易日收盘，再用同一日期的沪深300价格指数开盘和收盘相减。股票端必须有已核实的公司行为可比收益。指数必须是 `SH.000300` 价格指数，不能用 ETF 代替。缺任一端点则相对结果不可用。超额收益不是个股阿尔法证明。样本外多数类只看更早的参照段；全样本多数类只是命名过的描述上限。每个市场状态自己计算24块门槛。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
+  --session-date 2026-11-07 \
+  --study-dir ./study-v2 \
+  --pool ./pool.txt \
+  --universe ./a-share-snapshot.json \
+  --study-definition research-study-v2 \
+  --index-history ./csi300-price-index.json
+```
+
+指数快照如果来源不完整，命令以退出码 2 拒绝，不会生成清单。回顾性状态只打印，不写回清单：
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research retrospective-market-bucket \
+  --index-history ./csi300-price-index.json \
+  --cutoff 2026-10-31
+```
+
 ## 测试
 
 ```bash
@@ -160,11 +184,13 @@ PYTHONPATH=src python -m unittest tests.test_research_diagnostics tests.test_res
 - `src/xiao_a/research_diagnostics.py`
 - `src/xiao_a/research_candidates.py`
 - `src/xiao_a/research_daily.py`
+- `src/xiao_a/research_study_extensions.py`
 - `src/xiao_a/cli.py`
 - `src/xiao_a/backtest.py`
 - `tests/test_research_diagnostics.py`
 - `tests/test_research_candidates.py`
 - `tests/test_research_daily.py`
+- `tests/test_research_study_extensions.py`
 - `tests/test_backtest_constraints.py`
 - `tests/fixtures/research_backtest_spec.json`
 - `docs/RESEARCH_DIAGNOSTICS.md`

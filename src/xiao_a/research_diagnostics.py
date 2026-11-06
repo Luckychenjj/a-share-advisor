@@ -1349,6 +1349,7 @@ def run_research_command(args: Any) -> int:
             )
         elif args.research_command in {
             "sample-manifest", "sample-link", "shadow-freeze", "collect-evidence", "daily-status", "weekly-review",
+            "relative-study", "retrospective-market-bucket",
         }:
             from xiao_a.research_daily import run_daily_command
             return run_daily_command(args)

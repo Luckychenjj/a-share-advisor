@@ -222,6 +222,7 @@ def build_sample_manifest(
     universe: dict[str, Any],
     random_count: int,
     seed: str,
+    study_extension: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if random_count < 0:
         raise StudyRefusal("随机数量不能为负")
@@ -300,6 +301,8 @@ def build_sample_manifest(
         },
         "membership": membership,
     }
+    if study_extension is not None:
+        identity["study_extension"] = study_extension
     identity["identity_sha256"] = _sha256_json(identity)
     return identity
 
@@ -702,9 +705,23 @@ def run_daily_command(args: Any) -> int:
     try:
         command = args.research_command
         if command == "sample-manifest":
+            from datetime import datetime
+            from xiao_a.research_study_extensions import assert_prospective_session, classify_market_bucket
             pool, rejected = _read_symbol_lines(args.pool)
             universe = _load_universe(args.universe)
             holdings = _holding_symbols(args.holdings)
+            extension = None
+            definition = getattr(args, "study_definition", "research-study-v1")
+            if definition == "research-study-v2":
+                if args.index_history is None:
+                    raise StudyRefusal("research-study-v2 需要沪深300价格指数快照")
+                try:
+                    assert_prospective_session(args.session_date, datetime.now(_SHANGHAI).date().isoformat())
+                    extension = classify_market_bucket(_read_json(args.index_history), args.session_date)
+                except ValueError as exc:
+                    raise StudyRefusal(str(exc)) from exc
+            elif args.index_history is not None:
+                raise StudyRefusal("指数快照只属于 research-study-v2，不会写进已有的 v1 清单")
             manifest = build_sample_manifest(
                 session_date=args.session_date,
                 pool_symbols=pool,
@@ -714,6 +731,7 @@ def run_daily_command(args: Any) -> int:
                 universe=universe,
                 random_count=args.random_count,
                 seed=args.seed or args.session_date.replace("-", ""),
+                study_extension=extension,
             )
             result = write_sample_manifest(args.study_dir, manifest)
             result["pool_count"] = len(pool)
@@ -737,6 +755,23 @@ def run_daily_command(args: Any) -> int:
             result = daily_status(args.study_dir, args.session_date)
         elif command == "weekly-review":
             result = weekly_review(args.study_dir, args.review_date, args.predictions)
+        elif command == "relative-study":
+            from xiao_a.research_study_extensions import report_frozen_relative
+            manifest = load_frozen_manifest(args.study_dir, args.session_date)
+            labels = _read_json(args.labels)
+            if isinstance(labels, dict):
+                labels = labels.get("labels")
+            if not isinstance(labels, list):
+                raise StudyRefusal("相对标签文件必须是数组")
+            try:
+                result = report_frozen_relative(manifest, labels)
+            except ValueError as exc:
+                raise StudyRefusal(str(exc)) from exc
+        elif command == "retrospective-market-bucket":
+            from xiao_a.research_study_extensions import classify_market_bucket
+            result = classify_market_bucket(_read_json(args.index_history), args.cutoff)
+            result["retrospective"] = True
+            result["written_to_manifest"] = False
         else:
             raise StudyRefusal("未知的每日研究子命令")
         print(json.dumps(result, ensure_ascii=False, indent=2))
