@@ -19,17 +19,27 @@ from typing import Any
 from xiao_a.backtest import AShareBacktester, FeeSchedule, execution_assumptions
 from xiao_a.models import DailyBar, SignalAction
 from xiao_a.prediction_audit import TARGET_DEFINITION, _canonical, _roc_auc, _safe_float
+from xiao_a.review_monitor import REVIEW_POLICY
 
 
 SCHEMA = "xiao_a_research_diagnostics_v1"
 BACKTEST_SCHEMA = "xiao_a_research_backtest_v1"
 SCORE_EPSILON = 1e-12
-INSUFFICIENT_EVIDENCE_BLOCKS = 8
 DUCKDB_AUTO_BYTES = 1_000_000
 BOOTSTRAP_REPETITIONS = 1000
 BOOTSTRAP_SEED = "research-diagnostics-v1"
 TARGET_ID = TARGET_DEFINITION["target_id"]
 _SHANGHAI = timezone(timedelta(hours=8))
+
+
+def monitoring_block_minimum() -> int:
+    """Blocks required before review_monitor will score a direction comparison.
+
+    The production gate is one reference span plus two later observation
+    windows. Each span is ``recent_window_blocks`` long, so the current policy
+    is 8 + 2 * 8 = 24. A single window of 8 is not the gate.
+    """
+    return int(REVIEW_POLICY["reference_blocks"]) + 2 * int(REVIEW_POLICY["recent_window_blocks"])
 _REQUIRED_FEES = ("commission_rate", "minimum_commission", "stamp_duty_sell", "transfer_fee_rate")
 _FORBIDDEN_SPEC_KEYS = {"account_fees", "account_fees_path", "assets_ledger", "portfolio_path", "userdata"}
 
@@ -172,6 +182,9 @@ def _slice_events(events: list[dict[str, Any]], as_of: str | None) -> tuple[list
             "chain_prefix_aligned": True,
             "slice_hash_chain": "full_file",
             "note": "未设置 as-of 时诊断使用整份当前文件。事件数比旧报告多，只说明后来追加了事件，本身不是损坏。",
+            "decision_date_rule": "not_applied",
+            "excluded_decision_after_report_as_of": 0,
+            "excluded_missing_decision_date": 0,
         }
     try:
         cutoff = date.fromisoformat(as_of).isoformat()
@@ -203,11 +216,14 @@ def _slice_events(events: list[dict[str, Any]], as_of: str | None) -> tuple[list
         "excluded_missing_recorded_at": missing,
         "chain_prefix_aligned": prefix_aligned,
         "slice_hash_chain": "prefix_of_full_chain" if prefix_aligned else "not_a_prefix_timestamp_slice_still_reported",
-        "note": "截止日之后的事件不进入本次分母，也不表示台账损坏。损坏只由整份文件的哈希链判定。缺少 recorded_at 的事件不能证明落在截止日内，因此不进入切片。",
+        "decision_date_rule": "prediction as_of and information_cutoff must both be on or before the report date; recorded_at only decides which events are visible",
+        "excluded_decision_after_report_as_of": 0,
+        "excluded_missing_decision_date": 0,
+        "note": "recorded_at 只决定事件是否已经写入文件。预测自己的 as_of 或 information_cutoff 晚于报告日时，即使事件时间更早也不进入评分。退出日晚于报告日的标签也不使用。缺少 recorded_at 的事件不能证明落在截止日内。事件数变化本身不是损坏。",
     }
 
 
-def _classify_label(record: dict[str, Any], multiple_ids: set[str]) -> str:
+def _classify_label(record: dict[str, Any], multiple_ids: set[str], report_as_of: str | None = None) -> str:
     if str(record.get("prediction_id")) in multiple_ids:
         return "ambiguous_multiple_settlements"
     settlement = record.get("settlement")
@@ -237,7 +253,44 @@ def _classify_label(record: dict[str, Any], multiple_ids: set[str]) -> str:
         return "ambiguous_label"
     if not (cutoff < entry <= exit_day) or resolved != exit_day:
         return "ambiguous_label"
+    if report_as_of is not None:
+        settlement_recorded = shanghai_day(settlement.get("recorded_at"))
+        if (
+            settlement_recorded is None
+            or settlement_recorded > report_as_of
+            or entry > report_as_of
+            or exit_day > report_as_of
+        ):
+            return "label_not_knowable_at_as_of"
     return "resolvable"
+
+
+def _apply_decision_as_of(rows: list[dict[str, Any]], report_as_of: str | None) -> dict[str, Any]:
+    """Drop predictions whose own dates are after, or not comparable with, the report date.
+
+    Event ``recorded_at`` can be earlier than the prediction date. Scoring that
+    row would treat a later decision as if it belonged to the earlier report.
+    """
+    if report_as_of is None:
+        return {"rows": rows, "excluded_decision_after_report_as_of": 0, "excluded_missing_decision_date": 0}
+    kept: list[dict[str, Any]] = []
+    after = 0
+    missing = 0
+    for row in rows:
+        decision_day = shanghai_day(row.get("as_of"))
+        info_day = shanghai_day(row.get("information_cutoff"))
+        if decision_day is None or info_day is None:
+            missing += 1
+            continue
+        if decision_day > report_as_of or info_day > report_as_of:
+            after += 1
+            continue
+        kept.append(row)
+    return {
+        "rows": kept,
+        "excluded_decision_after_report_as_of": after,
+        "excluded_missing_decision_date": missing,
+    }
 
 
 def _dedupe_formal(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -351,7 +404,7 @@ def _binary_direction(pairs: list[tuple[float, bool]], *, near_zero_counted_as_n
         "constant_negative_hit_rate": constant_negative,
         "constant_positive_hit_rate": constant_positive,
         "majority_class_hit_rate": max(constant_negative, constant_positive),
-        "beats_constant_negative": hits > negatives,
+        "beats_constant_negative": (hits > negatives) if len(pairs) >= 2 else None,
         "roc_auc": _roc_auc([score for score, _ in pairs], labels),
         "near_zero_counted_as_not_up": near_zero_counted_as_not_up,
         "status": "证据不足" if len(pairs) < 2 or len(set(labels)) < 2 else "描述性统计",
@@ -458,7 +511,7 @@ def _nonoverlapping_blocks(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_date: dict[str, dict[str, dict[str, Any]]] = {}
     collapsed = 0
     missing_cutoff = 0
-    ordered = sorted(rows, key=lambda row: (str(row.get("as_of") or ""), _sequence(row), str(row.get("prediction_id") or "")))
+    ordered = sorted(rows, key=lambda row: (str(row.get("as_of") or ""), str(row.get("prediction_id") or "")))
     for row in ordered:
         day = shanghai_day(row.get("information_cutoff"))
         if not day:
@@ -531,12 +584,24 @@ def _overlapping_pairs(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _monitoring_gate_reason(blocks: int) -> str:
+    minimum = monitoring_block_minimum()
+    return (
+        f"非重叠日期块为 {blocks}，生产监测门槛是 {minimum}"
+        f"（{int(REVIEW_POLICY['reference_blocks'])} 个参考块 + 两个各 "
+        f"{int(REVIEW_POLICY['recent_window_blocks'])} 块的观察窗口）。"
+        "单个 8 块窗口只是其中一段，不能单独当成证据充足。"
+    )
+
+
 def _block_bootstrap(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    minimum = monitoring_block_minimum()
     usable = [block for block in blocks if block["direction_rows"] > 0]
-    if len(usable) < INSUFFICIENT_EVIDENCE_BLOCKS:
+    if len(usable) < minimum:
         return {
             "status": "证据不足",
-            "reason": "非重叠日期块少于8。行数重采样会把重叠的五日窗口伪装成独立样本，因此这里不给区间。",
+            "minimum_monitoring_blocks": minimum,
+            "reason": _monitoring_gate_reason(len(usable)) + "行数重采样会把重叠的五个交易日窗口伪装成独立样本，因此这里不给区间。",
             "repetitions": 0,
             "percentile_2_5": None,
             "percentile_97_5": None,
@@ -556,6 +621,7 @@ def _block_bootstrap(blocks: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "status": "描述性日期块重采样；不能消除金融时序相关，也不是预测改进的证明",
+        "minimum_monitoring_blocks": minimum,
         "seed": BOOTSTRAP_SEED,
         "repetitions": BOOTSTRAP_REPETITIONS,
         "percentile_2_5": percentile(0.025),
@@ -590,43 +656,65 @@ def _rule_metrics(rows: list[dict[str, Any]], rule: str) -> dict[str, Any]:
             abstentions += 1
             continue
         compared.append((prediction, bool(row["settlement"]["event_occurred"])))
-    if len(compared) < 2 or len({event for _, event in compared}) < 2:
-        status = "证据不足"
-    else:
-        status = "描述性统计"
     hits = sum(prediction == event for prediction, event in compared)
     negatives = sum(not event for _, event in compared)
     rows_n = len(compared)
+    enough = rows_n >= 2 and len({event for _, event in compared}) >= 2
+    sign_rule = not rule.startswith("constant_")
     return {
         "rule": rule,
         "rows": rows_n,
         "abstentions": abstentions,
+        "near_zero_or_missing_scores_excluded": abstentions if sign_rule else 0,
+        "denominator_excludes_near_zero_scores": sign_rule,
         "hits": hits,
         "hit_rate": hits / rows_n if rows_n else None,
         "constant_negative_hit_rate_on_same_rows": negatives / rows_n if rows_n else None,
-        "beats_constant_negative_on_these_rows": hits > negatives if rows_n else None,
-        "status": status,
+        "beats_constant_negative_on_these_rows": (hits > negatives) if enough else None,
+        "status": "描述性统计" if enough else "证据不足",
         "promoted": False,
     }
+
+
+def _decision_day(row: dict[str, Any]) -> str | None:
+    """Later of the prediction timestamp and the information cutoff.
+
+    Ordering by only one of them can place a decision made on a later date into
+    an earlier research slice.
+    """
+    days = [day for day in (shanghai_day(row.get("as_of")), shanghai_day(row.get("information_cutoff"))) if day]
+    return max(days) if days else None
+
+
+def _nonzero_rule_row(row: dict[str, Any]) -> bool:
+    score = _safe_float(row.get("rule_score"))
+    return row.get("score_type") == "rule_conformance_score" and score is not None and abs(score) > SCORE_EPSILON
 
 
 def _out_of_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Chronological sign-rule comparison with label windows purged at the cut.
 
-    No threshold is searched. Beating the constant-negative rule on this split
-    is still not a production promotion.
+    No threshold is searched. The stored exit date is the fifth trading-session
+    close. A reference label is kept only when that close is strictly before
+    the test boundary. Beating constant-negative here is not a promotion, and
+    the comparison stays insufficient until the test segment itself has the
+    production monitoring block count.
     """
+    minimum = monitoring_block_minimum()
     dated = []
     for row in rows:
-        day = shanghai_day(row.get("information_cutoff"))
+        day = _decision_day(row)
         if day:
             dated.append((day, row))
     dates = sorted({day for day, _ in dated})
     base = {
-        "method": "chronological_last_30_percent_of_cutoff_dates",
-        "test_start_rule": "sorted_information_cutoff_dates[floor(n * 0.7)]",
-        "purge": "reference row is removed unless exit_date is strictly before test_start",
+        "method": "chronological_last_30_percent_of_decision_dates",
+        "test_start_rule": "sorted_decision_dates[floor(n * 0.7)]",
+        "decision_date": "max(as_of, information_cutoff) in Asia/Shanghai",
+        "purge": "reference row is removed unless the fifth-session exit_date is strictly before test_start",
         "embargo_sessions": 5,
+        "embargo_unit": "trading_sessions_represented_by_settlement_entry_and_exit_dates",
+        "minimum_monitoring_blocks": minimum,
         "in_sample_threshold_search": "not_performed",
         "selection_performed": False,
         "selected_rule": None,
@@ -634,12 +722,13 @@ def _out_of_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "calibrated_probability_available_for_production": False,
         "production_weights_unchanged": True,
         "predictive_improvement_claim_allowed": False,
+        "insufficient_evidence": True,
     }
     if len(dates) < 6:
         return {
             **base,
             "status": "证据不足",
-            "reason": "时间外比较至少需要6个不同的信息截止日，并且不在样本内搜索阈值。",
+            "reason": "时间外比较至少需要6个不同的决策日，并且不在样本内搜索阈值。",
             "distinct_cutoff_dates": len(dates),
         }
     test_start = dates[int(len(dates) * 0.7)]
@@ -651,25 +740,34 @@ def _out_of_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
             test.append(row)
             continue
         exit_day = shanghai_day((row.get("settlement") or {}).get("exit_date"))
-        if exit_day is not None and exit_day < test_start:
+        entry_day = shanghai_day((row.get("settlement") or {}).get("entry_date"))
+        if exit_day is not None and entry_day is not None and exit_day < test_start and entry_day < test_start:
             reference.append(row)
         else:
             purged.append(row)
     names = ["constant_negative", "constant_positive", "ensemble_positive_sign"]
     discovered: set[str] = set()
-    for row in dated:
-        scores = row[1].get("submodel_scores")
+    for _day, row in dated:
+        scores = row.get("submodel_scores")
         if isinstance(scores, dict):
             discovered.update(str(key) for key in scores)
     names.extend(f"submodel_positive_sign:{name}" for name in sorted(discovered))
-    test_blocks = _nonoverlapping_blocks(test)["blocks"]
-    test_classes = {bool(row["settlement"]["event_occurred"]) for row in test}
-    insufficient = len(test) < 2 or len(test_classes) < 2 or len(test_blocks) < 2
+    test_gate_rows = [row for row in test if _nonzero_rule_row(row)]
+    test_blocks = _nonoverlapping_blocks(test_gate_rows)["blocks"]
+    test_classes = {bool(row["settlement"]["event_occurred"]) for row in test_gate_rows}
+    insufficient = len(test_blocks) < minimum or len(test_gate_rows) < 2 or len(test_classes) < 2
+    reference_rules = [_rule_metrics(reference, rule) for rule in names]
+    test_rules = [_rule_metrics(test, rule) for rule in names]
+    if insufficient:
+        for rule in (*reference_rules, *test_rules):
+            rule["status"] = "证据不足"
+            rule["beats_constant_negative_on_these_rows"] = None
     return {
         **base,
+        "insufficient_evidence": insufficient,
         "status": "证据不足" if insufficient else "时间外描述性对照；不是已验证的预测改进",
         "reason": (
-            "测试段样本、类别或非重叠日期块不足。"
+            _monitoring_gate_reason(len(test_blocks)) + "接近零的规则分不进入符号规则分母，也不增加监测日期块。"
             if insufficient
             else "规则和符号阈值在看测试标签之前就已固定。即便测试段高于常数看空，也不能升级生产权重。"
         ),
@@ -678,14 +776,15 @@ def _out_of_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "reference_rows_after_purge": len(reference),
         "purged_rows": len(purged),
         "test_rows": len(test),
+        "test_nonzero_rule_rows": len(test_gate_rows),
         "test_nonoverlapping_date_blocks": len(test_blocks),
         "in_sample_reference_not_a_result": {
             "label": "样本内参照只用于核对，不能拿来挑选规则或宣称改进",
-            "rules": [_rule_metrics(reference, rule) for rule in names],
+            "rules": reference_rules,
         },
         "out_of_sample_descriptive": {
-            "label": "测试段只作描述。本模块不根据这些数字选择或发布候选。",
-            "rules": [_rule_metrics(test, rule) for rule in names],
+            "label": "测试段只作描述。符号规则与常数看空比的是同一批非零分数；本模块不据此选择或发布候选。",
+            "rules": test_rules,
         },
     }
 
@@ -882,8 +981,11 @@ def build_research_report(
     multiple_ids = fold_meta.pop("_multiple_ids")
     mode_counts = Counter(record.get("mode") if record.get("mode") in {"formal", "experiment"} else "legacy_mode_unspecified" for record in records)
     deduped = _dedupe_formal(records)
-    research_rows = deduped["rows"]
-    labels = [_classify_label(record, multiple_ids) for record in research_rows]
+    decision_filter = _apply_decision_as_of(deduped["rows"], cutoff.get("as_of"))
+    research_rows = decision_filter["rows"]
+    cutoff["excluded_decision_after_report_as_of"] = decision_filter["excluded_decision_after_report_as_of"]
+    cutoff["excluded_missing_decision_date"] = decision_filter["excluded_missing_decision_date"]
+    labels = [_classify_label(record, multiple_ids, cutoff.get("as_of")) for record in research_rows]
     label_counts = dict(sorted(Counter(labels).items()))
     resolvable = [record for record, label in zip(research_rows, labels) if label == "resolvable"]
     rule_rows = [record for record in resolvable if record.get("score_type") == "rule_conformance_score"]
@@ -892,14 +994,13 @@ def build_research_report(
     direction = _direction_table(rule_rows)
     nonzero = direction["nonzero_production_definition"]
     inclusive = direction["all_finite"]
-    block_info = _nonoverlapping_blocks(resolvable)
+    monitoring_rows = [row for row in rule_rows if _nonzero_rule_row(row)]
+    block_info = _nonoverlapping_blocks(monitoring_rows)
     blocks = block_info["blocks"]
-    overlap = _overlapping_pairs(resolvable)
-    insufficient = (
-        nonzero["rows"] < 2
-        or len(blocks) < INSUFFICIENT_EVIDENCE_BLOCKS
-        or nonzero["status"] == "证据不足"
-    )
+    resolvable_blocks = _nonoverlapping_blocks(resolvable)["blocks"]
+    overlap = _overlapping_pairs(monitoring_rows)
+    minimum_blocks = monitoring_block_minimum()
+    insufficient = len(blocks) < minimum_blocks or nonzero["rows"] < 2 or nonzero["status"] == "证据不足"
     corrections = sum(len(record.get("corrections") or []) for record in records)
     created = sum(event.get("event_type") == "prediction_created" for event in sliced)
     repeated = sum(event.get("event_type") == "prediction_repeated" for event in sliced)
@@ -952,9 +1053,12 @@ def build_research_report(
             {"name": "legacy_mode_unspecified", "count": mode_counts.get("legacy_mode_unspecified", 0), "definition": "没有 mode 的旧记录。不回填成 formal，也不进入正式研究分母"},
             {"name": "excluded_duplicate_symbol_as_of_date", "count": deduped["excluded_duplicate_symbol_as_of_date"], "definition": "同一标的、同一 as_of 上海日期的正式记录只保留 sequence 最早的一条"},
             {"name": "excluded_missing_symbol_or_as_of", "count": deduped["excluded_missing_symbol_or_as_of"], "definition": "正式记录缺少 symbol 或 as_of，不能进入按日去重后的研究分母"},
-            {"name": "formal_research_rows", "count": len(research_rows), "definition": "去重后的正式研究行。as_of 与 information_cutoff 在同一天不会因此被剔除"},
-            {"name": "research_resolvable_v1", "count": len(resolvable), "definition": "目标、收益符号、入场日和退出日都能对上 forward_positive_return_5_sessions_v1 的行"},
-            {"name": "direction_nonzero_rule_score", "count": nonzero["rows"], "definition": "生产报告同口径：规则符合分绝对值大于 1e-12 的可解析行"},
+            {"name": "excluded_decision_after_report_as_of", "count": decision_filter["excluded_decision_after_report_as_of"], "definition": "事件 recorded_at 已可见，但预测 as_of 或 information_cutoff 晚于报告日"},
+            {"name": "excluded_missing_decision_date", "count": decision_filter["excluded_missing_decision_date"], "definition": "设置了 as-of，但预测缺少 as_of 或 information_cutoff，不能证明没有穿越"},
+            {"name": "formal_research_rows", "count": len(research_rows), "definition": "去重后且决策日不晚于报告日的正式研究行。as_of 与 information_cutoff 在同一天不会因此被剔除"},
+            {"name": "labels_not_knowable_at_as_of", "count": label_counts.get("label_not_knowable_at_as_of", 0), "definition": "五个交易日窗口的退出日或结算写入日晚于报告日，标签不进入方向分母"},
+            {"name": "research_resolvable_v1", "count": len(resolvable), "definition": "目标、收益符号、入场日和退出日都能对上 forward_positive_return_5_sessions_v1，且在报告日已经可知"},
+            {"name": "direction_nonzero_rule_score", "count": nonzero["rows"], "definition": "生产报告同口径：规则符合分绝对值大于 1e-12 的可解析行。接近零的分数不进入这个分母"},
         ],
         "same_calendar_day_as_information_cutoff": {
             "rows": _same_cutoff_day(research_rows),
@@ -986,12 +1090,15 @@ def build_research_report(
         "direction": {
             "definition": "rule_score > 0 是否等于 event_occurred。接近零的分数在生产口径里弃权，不算看空。",
             "production_report_excludes_near_zero": True,
+            "score_epsilon": SCORE_EPSILON,
+            "zero_scores_are_not_in_the_direction_denominator": True,
             "denominators_match": nonzero["rows"] == inclusive["rows"],
             "nonzero_production_definition": nonzero,
             "all_finite_scores_nonpositive_means_not_up": inclusive,
             "beats_constant_negative_direction_baseline": nonzero["beats_constant_negative"],
             "outperformance_of_constant_negative_is_not_a_verified_edge": True,
             "insufficient_evidence": insufficient,
+            "minimum_monitoring_blocks": minimum_blocks,
             "status": "证据不足" if insufficient else "描述性统计；不是买入胜率或净收益",
         },
         "class_balance": {
@@ -1012,7 +1119,14 @@ def build_research_report(
         "actions": _action_report(resolvable),
         "overlap": {
             "horizon_sessions": 5,
+            "horizon_unit": "trading_sessions_from_settlement_entry_date_through_exit_date",
+            "minimum_monitoring_blocks": minimum_blocks,
+            "monitoring_policy_version": REVIEW_POLICY["version"],
+            "reference_blocks": int(REVIEW_POLICY["reference_blocks"]),
+            "recent_window_blocks": int(REVIEW_POLICY["recent_window_blocks"]),
             "nonoverlapping_date_blocks": len(blocks),
+            "resolvable_blocks_including_near_zero_scores": len(resolvable_blocks),
+            "near_zero_scores_do_not_add_monitoring_blocks": True,
             "representative_rows_in_blocks": sum(block["representative_rows"] for block in blocks),
             "representative_rows_skipped_because_cutoff_falls_inside_prior_window": block_info["skipped_representatives"],
             "extra_rows_collapsed_on_same_symbol_and_cutoff_day": block_info["collapsed_same_symbol_cutoff_day"],
@@ -1021,9 +1135,9 @@ def build_research_report(
             "overlapping_same_symbol_window_pairs": overlap["overlapping_same_symbol_window_pairs"],
             "independent_sample_proxy": len(blocks),
             "row_count_is_not_independent_sample_size": True,
-            "insufficient_evidence": len(blocks) < INSUFFICIENT_EVIDENCE_BLOCKS or len(resolvable) < 2,
+            "insufficient_evidence": len(blocks) < minimum_blocks or len(monitoring_rows) < 2,
             "block_bootstrap": _block_bootstrap(blocks),
-            "note": "非重叠块按信息截止日向前贪心选取：下一块的截止日必须晚于上一块的退出日。这和复核监测的日期块同一思路，只是研究描述，不是自动改规则的阈值。",
+            "note": "监测块只使用非零规则分。下一块的信息截止日必须晚于上一块第五个交易日退出日；截止日等于退出日仍然重叠。接近零的分数不把块数凑过生产门槛。",
         },
         "cohorts": _cohorts(
             research_rows,
@@ -1043,7 +1157,7 @@ def build_research_report(
             "常数看空在下跌样本占多数时可以有更高的方向命中率，这不构成交易优势。",
             "同一标的同一 as_of 日的重复正式记录被剔除并单列；as_of 与 information_cutoff 同一天不会被剔除。",
             "样本不是随机样本。旧记录缺少 cohort bucket 时保持未指定，不回填。",
-            "五日窗口重叠。非重叠日期块少于8时，证据不足以支持表现声明。",
+            "五个交易日窗口按结算记录的入场日到退出日重叠。证据门槛与生产监测相同：8个参考块加两个各8块的观察窗口，当前是24块。单个8块窗口不足。",
             "时间外规则比较不做阈值搜索，也不自动晋升候选。",
             "本报告不重写台账、不结算、不修改生产权重、不下单。",
             "费用只出现在单独的研究回测规格里，不读取账户费率文件。",

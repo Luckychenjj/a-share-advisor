@@ -17,9 +17,11 @@ from xiao_a.research_diagnostics import (
     chain_integrity,
     diagnose_audit_file,
     fold_records,
+    monitoring_block_minimum,
     read_audit_events,
     shanghai_day,
 )
+from xiao_a.review_monitor import REVIEW_POLICY
 
 
 TARGET = {"target_id": TARGET_DEFINITION["target_id"], "horizon_sessions": 5}
@@ -59,6 +61,9 @@ def prediction(
     include_settlement: bool = True,
     research_cohort: dict | None = None,
     as_of: str | None = None,
+    information_cutoff: str | None = None,
+    entry_date: date | None = None,
+    exit_date: date | None = None,
 ) -> list[dict]:
     stamp = f"{day.isoformat()}T15:00:00+08:00"
     created = {
@@ -68,7 +73,7 @@ def prediction(
         "mode": mode,
         "symbol": symbol,
         "as_of": as_of or stamp,
-        "information_cutoff": stamp,
+        "information_cutoff": information_cutoff or stamp,
         "rule_score": score,
         "model_id": "advisor_rules_ensemble",
         "recommendation": {
@@ -88,8 +93,8 @@ def prediction(
     events = [created]
     if event is None or not include_settlement:
         return events
-    entry = day + timedelta(days=1)
-    exit_day = day + timedelta(days=7)
+    entry = entry_date or (day + timedelta(days=1))
+    exit_day = exit_date or (day + timedelta(days=7))
     resolved_return = (0.02 if event else -0.02) if target_return is None else target_return
     events.append({
         "event_type": "prediction_settled",
@@ -323,12 +328,42 @@ class ResearchDiagnosticTests(unittest.TestCase):
         self.assertIsNone(comparison["selected_rule"])
         self.assertFalse(comparison["predictive_improvement_claim_allowed"])
         self.assertFalse(comparison["calibrated_probability_available_for_production"])
+        self.assertTrue(comparison["insufficient_evidence"])
+        self.assertEqual(comparison["minimum_monitoring_blocks"], monitoring_block_minimum())
+        self.assertEqual(comparison["status"], "证据不足")
+        self.assertLess(comparison["test_nonoverlapping_date_blocks"], monitoring_block_minimum())
         self.assertTrue(all(rule["promoted"] is False for rule in comparison["out_of_sample_descriptive"]["rules"]))
+        self.assertTrue(all(rule["status"] == "证据不足" for rule in comparison["out_of_sample_descriptive"]["rules"]))
         self.assertIn("样本内参照", comparison["in_sample_reference_not_a_result"]["label"])
 
-    def test_eight_nonoverlapping_blocks_get_a_descriptive_interval_only(self):
-        groups = []
+    def test_monitoring_gate_is_twenty_four_blocks_and_eight_is_not_enough(self):
+        minimum = monitoring_block_minimum()
+        self.assertEqual(
+            minimum,
+            REVIEW_POLICY["reference_blocks"] + 2 * REVIEW_POLICY["recent_window_blocks"],
+        )
+        self.assertEqual(minimum, 24)
+        self.assertGreater(minimum, REVIEW_POLICY["reference_blocks"])
+        self.assertGreater(minimum, REVIEW_POLICY["recent_window_blocks"])
+        short = []
         for index in range(8):
+            day = date(2026, 1, 5) + timedelta(days=40 * index)
+            short.append(prediction(
+                prediction_id=f"s{index}",
+                day=day,
+                symbol=f"TEST.S{index}",
+                score=0.3 if index % 2 == 0 else -0.3,
+                event=index % 2 == 0,
+            ))
+        short_report = report_for(*short)
+        self.assertEqual(short_report["overlap"]["nonoverlapping_date_blocks"], 8)
+        self.assertEqual(short_report["overlap"]["minimum_monitoring_blocks"], 24)
+        self.assertTrue(short_report["overlap"]["insufficient_evidence"])
+        self.assertTrue(short_report["direction"]["insufficient_evidence"])
+        self.assertIsNone(short_report["overlap"]["block_bootstrap"]["percentile_2_5"])
+        self.assertIn("24", short_report["overlap"]["block_bootstrap"]["reason"])
+        groups = []
+        for index in range(minimum):
             day = date(2026, 1, 5) + timedelta(days=40 * index)
             groups.append(prediction(
                 prediction_id=f"b{index}",
@@ -340,7 +375,7 @@ class ResearchDiagnosticTests(unittest.TestCase):
         first = report_for(*groups)
         second = report_for(*groups)
         overlap = first["overlap"]
-        self.assertEqual(overlap["nonoverlapping_date_blocks"], 8)
+        self.assertEqual(overlap["nonoverlapping_date_blocks"], 24)
         self.assertFalse(overlap["insufficient_evidence"])
         bootstrap = overlap["block_bootstrap"]
         self.assertIn("描述性", bootstrap["status"])
@@ -349,6 +384,127 @@ class ResearchDiagnosticTests(unittest.TestCase):
         self.assertLessEqual(bootstrap["percentile_2_5"], bootstrap["percentile_97_5"])
         self.assertEqual(first["overlap"]["block_bootstrap"], second["overlap"]["block_bootstrap"])
         self.assertFalse(first["predictive_improvement_claim_allowed"])
+        self.assertFalse(first["candidate_promoted"])
+
+    def test_as_of_uses_prediction_dates_and_five_session_exit_not_event_time(self):
+        future_decision = prediction(
+            prediction_id="future",
+            day=date(2026, 7, 1),
+            symbol="TEST.FUTURE",
+            event=True,
+            recorded_at="2026-06-01T10:00:00+08:00",
+            settlement_recorded_at="2026-06-02T10:00:00+08:00",
+        )
+        early_label = prediction(
+            prediction_id="early-label",
+            day=date(2026, 6, 1),
+            symbol="TEST.EARLY",
+            event=True,
+            recorded_at="2026-06-01T11:00:00+08:00",
+            settlement_recorded_at="2026-06-03T11:00:00+08:00",
+            entry_date=date(2026, 6, 2),
+            exit_date=date(2026, 6, 8),
+        )
+        visible = prediction(
+            prediction_id="visible",
+            day=date(2026, 5, 20),
+            symbol="TEST.VISIBLE",
+            score=-0.2,
+            event=False,
+            recorded_at="2026-05-20T15:00:00+08:00",
+            settlement_recorded_at="2026-05-29T15:00:00+08:00",
+            entry_date=date(2026, 5, 21),
+            exit_date=date(2026, 5, 27),
+        )
+        original = json.dumps([*future_decision, *early_label, *visible], sort_keys=True)
+        report = report_for(future_decision, early_label, visible, as_of="2026-06-04")
+        self.assertEqual(json.dumps([*future_decision, *early_label, *visible], sort_keys=True), original)
+        self.assertEqual(report["cutoff"]["excluded_decision_after_report_as_of"], 1)
+        self.assertEqual(report["labels"]["counts"].get("label_not_knowable_at_as_of"), 1)
+        self.assertEqual(report["direction"]["nonzero_production_definition"]["rows"], 1)
+        self.assertEqual(report["direction"]["nonzero_production_definition"]["hits"], 1)
+        self.assertFalse(report["audit_rewritten"])
+
+    def test_zero_scores_leave_the_direction_denominator_and_do_not_create_blocks(self):
+        zeros = [
+            prediction(prediction_id=f"z{index}", day=date(2026, 4, 1) + timedelta(days=index), score=0.0, event=False)
+            for index in range(3)
+        ]
+        nonzero = prediction(prediction_id="nz", day=date(2026, 4, 10), score=0.4, event=True)
+        report = report_for(*zeros, nonzero)
+        direction = report["direction"]["nonzero_production_definition"]
+        inclusive = report["direction"]["all_finite_scores_nonpositive_means_not_up"]
+        self.assertEqual(direction["rows"], 1)
+        self.assertEqual(inclusive["rows"], 4)
+        self.assertIsNone(direction["beats_constant_negative"])
+        self.assertIsNone(report["direction"]["beats_constant_negative_direction_baseline"])
+        self.assertIsNone(report["auc"]["ensemble_rule_score_direction_sample"])
+        spaced = [
+            prediction(
+                prediction_id="left",
+                day=date(2026, 1, 5),
+                symbol="TEST.LEFT",
+                score=0.4,
+                event=True,
+                entry_date=date(2026, 1, 6),
+                exit_date=date(2026, 1, 12),
+            ),
+            prediction(
+                prediction_id="zero-gap",
+                day=date(2026, 2, 2),
+                symbol="TEST.GAP",
+                score=0.0,
+                event=False,
+                entry_date=date(2026, 2, 3),
+                exit_date=date(2026, 2, 9),
+            ),
+            prediction(
+                prediction_id="right",
+                day=date(2026, 3, 2),
+                symbol="TEST.RIGHT",
+                score=-0.4,
+                event=False,
+                entry_date=date(2026, 3, 3),
+                exit_date=date(2026, 3, 9),
+            ),
+        ]
+        blocked = report_for(*spaced)
+        self.assertEqual(blocked["overlap"]["nonoverlapping_date_blocks"], 2)
+        self.assertGreater(blocked["overlap"]["resolvable_blocks_including_near_zero_scores"], 2)
+        self.assertTrue(blocked["overlap"]["near_zero_scores_do_not_add_monitoring_blocks"])
+        touching = [
+            prediction(
+                prediction_id="window",
+                day=date(2026, 1, 2),
+                symbol="TEST.WINDOW",
+                score=0.5,
+                event=True,
+                entry_date=date(2026, 1, 5),
+                exit_date=date(2026, 1, 13),
+            ),
+            prediction(
+                prediction_id="still-inside",
+                day=date(2026, 1, 6),
+                symbol="TEST.WINDOW",
+                score=-0.5,
+                event=False,
+                entry_date=date(2026, 1, 7),
+                exit_date=date(2026, 1, 13),
+            ),
+            prediction(
+                prediction_id="after-exit",
+                day=date(2026, 1, 14),
+                symbol="TEST.NEXT",
+                score=0.5,
+                event=False,
+                entry_date=date(2026, 1, 15),
+                exit_date=date(2026, 1, 21),
+            ),
+        ]
+        windows = report_for(*touching)
+        self.assertEqual(windows["overlap"]["nonoverlapping_date_blocks"], 2)
+        self.assertGreater(windows["overlap"]["representative_rows_skipped_because_cutoff_falls_inside_prior_window"], 0)
+        self.assertGreater(windows["overlap"]["overlapping_same_symbol_window_pairs"], 0)
 
     def test_multiple_settlements_and_broken_chain_stop_confident_scoring(self):
         created, settled = prediction(prediction_id="twice", day=date(2026, 2, 2), event=True)
@@ -405,9 +561,20 @@ class ResearchDiagnosticTests(unittest.TestCase):
                 "execution_simulation": "not_applied",
             })
             before = path.read_bytes()
+            real_open = Path.open
+
+            def guarded_open(self, mode="r", *args, **kwargs):
+                if self == path and any(flag in mode for flag in ("w", "a", "x", "+")):
+                    raise AssertionError(f"audit opened for write: {mode}")
+                return real_open(self, mode, *args, **kwargs)
+
             stdout = StringIO()
             with redirect_stdout(stdout):
-                code = main(["research", "audit", "--audit", str(path), "--engine", "duckdb"])
+                Path.open = guarded_open
+                try:
+                    code = main(["research", "audit", "--audit", str(path), "--engine", "duckdb"])
+                finally:
+                    Path.open = real_open
             self.assertEqual(code, 0)
             self.assertEqual(path.read_bytes(), before)
             payload = json.loads(stdout.getvalue())
