@@ -57,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     backtest = research_commands.add_parser("backtest", help="用显式费率和日线规格跑既有A股约束回测")
     backtest.add_argument("--spec", type=Path, required=True, help="合成或本地日线规格 JSON")
     backtest.add_argument("--output", type=Path)
+    candidates = research_commands.add_parser("candidates", help="对照预先固定的候选规则；不写台账、不给全局净收益")
+    candidates.add_argument("--audit", type=Path, required=True)
+    candidates.add_argument("--as-of", dest="as_of")
+    candidates.add_argument("--cohort-annotations", type=Path)
+    candidates.add_argument("--execution-spec", type=Path, help="可选的未来成交路径规格；审计快照不能代替它")
+    candidates.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.command == "quote":
         return _quote(args.symbol)

@@ -1,6 +1,6 @@
 # 只读研究诊断与 A 股约束回测
 
-这条命令只读取本地文件并打印 JSON。它不结算预测、不追加审计事件、不改写历史、不读取账户费率或资产台账，也不修改 `decision.py` / `ensemble.py` 的生产权重。候选规则不会自动晋升。`calibrated_probability_available_for_production` 固定为 `false`。
+这条命令只读取本地文件并打印 JSON。它不结算预测、不追加审计事件、不改写历史，也不修改 `decision.py` / `ensemble.py` 的生产权重。候选规则不会自动晋升。`calibrated_probability_available_for_production` 固定为 `false`。审计诊断本身不读账户费率。只有单独的执行规格明确声明费率的历史适用性时，才会在本机读取用户给出的费率文件，并且仍然不形成全局净收益。
 
 规则符合分不是概率。方向命中率不是买入事件率，也不是扣费后的净收益。审计标签的 `execution_simulation` 仍是 `not_applied`。私人台账没有随本仓库提供；下面的命令是在你自己的机器上复核分母用的，仓库测试只用合成样本。
 
@@ -68,10 +68,32 @@ PYTHONPATH=src python -m xiao_a.cli research backtest \
 
 自己的日线规格放在仓库外。规格里出现 `account_fees_path`、`assets_ledger` 或 `portfolio_path` 会被拒绝。日线必须已经按交易日递增。这个结果是单标的研究模拟，不能回写成审计结算，也不能从方向命中率推出来。
 
+## 预先固定的候选对照
+
+两个候选在看结果之前就固定，使用生产代码里已有的动作门槛：分数大于等于 0.25 为买入，小于等于 -0.20 为减仓，小于等于 -0.55 为卖出。不在结果上搜索新门槛。
+
+- `ensemble_baseline` 只用保存的 `rule_score`。
+- `multi_factor_alone` 只用保存的 `submodel_scores.multi_factor`。缺失或接近零就弃权，不用成分重新计算。
+- `consensus_only` 要求至少两个非零参与者同号。缺失和接近零的分数不投票。买入仍要最弱的参与者达到 0.25。意见不一致就弃权。
+
+常数看多、常数看空和不发信号在同一批标的和日期上对照。方向命中率和买入事件率分母分开。卖出信号不会开空。
+
+状态分组只读 `strategy_signals.market_regime.metadata.regime`，以及 `available_inputs` 和 `invalidation_active`。没有这份元数据就是缺失，不用后来的价格或分数反推。买点分组是探索性描述，不挑选胜者。多因子之所以被拿来对照，是因为这份研究已经知道它；旧切片不是前瞻确认。配置指纹只覆盖规则文本，不覆盖本次文件里的截止日期。
+
+全局可执行净收益保持不可用。结算端点价、预测前的快照日线、把后来快照拼出的覆盖率、预测当时的涨跌停价，以及未经核实的停牌/ST/涨跌停标志，都不能当成成交路径，也不能把标签收益当成净收益。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research candidates \
+  --audit "$XIAO_A_AUDIT_FILE" \
+  --as-of 2026-11-06
+```
+
+不要把审计文件、费率文件或日线规格提交到仓库。
+
 ## 测试
 
 ```bash
-PYTHONPATH=src python -m unittest tests.test_research_diagnostics tests.test_backtest_constraints -v
+PYTHONPATH=src python -m unittest tests.test_research_diagnostics tests.test_research_candidates tests.test_backtest_constraints -v
 ```
 
 测试只用 `TEST.*` 一类合成代码和虚构价格。
@@ -79,9 +101,11 @@ PYTHONPATH=src python -m unittest tests.test_research_diagnostics tests.test_bac
 ## 本次改动允许清单
 
 - `src/xiao_a/research_diagnostics.py`
+- `src/xiao_a/research_candidates.py`
 - `src/xiao_a/cli.py`
 - `src/xiao_a/backtest.py`
 - `tests/test_research_diagnostics.py`
+- `tests/test_research_candidates.py`
 - `tests/test_backtest_constraints.py`
 - `tests/fixtures/research_backtest_spec.json`
 - `docs/RESEARCH_DIAGNOSTICS.md`

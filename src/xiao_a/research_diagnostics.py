@@ -1334,6 +1334,19 @@ def run_research_command(args: Any) -> int:
             except json.JSONDecodeError as exc:
                 raise ValueError("回测规格不是有效 JSON") from exc
             report = run_research_backtest_spec(spec)
+        elif args.research_command == "candidates":
+            from xiao_a.research_candidates import diagnose_candidates_file
+            protected.append(args.audit)
+            if args.cohort_annotations is not None:
+                protected.append(args.cohort_annotations)
+            if args.execution_spec is not None:
+                protected.append(args.execution_spec)
+            report = diagnose_candidates_file(
+                args.audit,
+                as_of=args.as_of,
+                cohort_annotations=args.cohort_annotations,
+                execution_spec=args.execution_spec,
+            )
         else:
             raise ValueError("未知的研究子命令")
         text = json.dumps(report, ensure_ascii=False, indent=2)
