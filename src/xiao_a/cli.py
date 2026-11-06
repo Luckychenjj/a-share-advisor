@@ -46,6 +46,17 @@ def main(argv: list[str] | None = None) -> int:
     cloud = subparsers.add_parser("cloud", help="启动需要认证的分析服务")
     cloud.add_argument("--host", default="127.0.0.1")
     cloud.add_argument("--port", type=int, default=8766)
+    research = subparsers.add_parser("research", help="只读研究诊断；不结算、不改权重、不下单")
+    research_commands = research.add_subparsers(dest="research_command", required=True)
+    audit = research_commands.add_parser("audit", help="读取本地预测台账并输出分母、基线和时间外对照")
+    audit.add_argument("--audit", type=Path, required=True, help="本地 prediction_audit.jsonl，只读")
+    audit.add_argument("--as-of", dest="as_of", help="上海日期 YYYY-MM-DD；只纳入 recorded_at 不晚于该日的事件")
+    audit.add_argument("--cohort-annotations", type=Path, help="可选的外部 cohort 注释，不回填台账")
+    audit.add_argument("--engine", choices=("auto", "python", "duckdb"), default="auto")
+    audit.add_argument("--output", type=Path, help="把 JSON 报告写到新文件；不能覆盖台账")
+    backtest = research_commands.add_parser("backtest", help="用显式费率和日线规格跑既有A股约束回测")
+    backtest.add_argument("--spec", type=Path, required=True, help="合成或本地日线规格 JSON")
+    backtest.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.command == "quote":
         return _quote(args.symbol)
@@ -56,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cloud":
         from xiao_a.cloud import run_cloud
         return run_cloud(host=args.host, port=args.port)
+    if args.command == "research":
+        from xiao_a.research_diagnostics import run_research_command
+        return run_research_command(args)
     from xiao_a.dashboard import run_dashboard
     return run_dashboard(port=args.port, open_browser=not args.no_browser)
 
