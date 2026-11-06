@@ -90,6 +90,63 @@ PYTHONPATH=src python -m xiao_a.cli research candidates \
 
 不要把审计文件、费率文件或日线规格提交到仓库。
 
+## 每日前瞻样本
+
+这些命令只写研究目录里的侧车，不调用自动评估，不结算，不改审计哈希链，也不创建定时任务。固定池来自调用方给出的股票列表文件，程序不把数量写成 35。全市场名单没有已接入的公开完整列表适配器；`--universe` 必须是本地快照。快照过期会标明 `stale_list_reused`，并且不声称名单完整或随机抽样无偏。ST、退市、零价和停牌只在快照里明确知道时才排除。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
+  --session-date 2026-11-07 \
+  --study-dir ./study \
+  --pool watchlists/inst-counter-2026-10-21/symbols.txt \
+  --holdings ./portfolio.json \
+  --universe ./a-share-snapshot.json \
+  --random-count 18
+```
+
+退出码 0 表示清单已创建或内容相同；退出码 2 表示清单已冻结却被换成另一套成员。同一天再跑不会重抽随机样本。
+
+评估仍由现有调用方逐只执行。每次评估之后，把同一次响应里的预测 ID、指纹和快照引用交给链接命令。只有这三项都在、并且代码属于已冻结清单时才算确认。只有代码和日期、或指纹对不上，会追加一条 `ambiguous`，不会猜。同一预测 ID 重复追加是无操作；同一天另一次评估的另一个预测 ID 会再追加，不会替换清单。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research sample-link \
+  --study-dir ./study \
+  --session-date 2026-11-07 \
+  --response ./one-eval.json
+```
+
+影子命令只读清单、链接和已保存的预测记录，不重新拉行情、不重算因子。配置指纹、代码版本和 `prospective_shadow_start` 第一次写入后不变。分数侧车不含结算标签。映射不确定就标 `ambiguous`。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research shadow-freeze \
+  --study-dir ./study \
+  --session-date 2026-11-07 \
+  --predictions ./saved-predictions.jsonl
+```
+
+证据命令默认不访问网络。加上 `--fetch` 才调用现有公开日线适配器，并且只为清单内的代码请求有限根数。适配器给出的涨跌停比例、零成交量停牌推断和前复权价格都不会被当成交易所限价、核实停牌或官方复权因子。部分结果会留下，但 `usable_for_executable_backtest` 仍是 0。`--budget-seconds` 默认 300，在每只代码开始前检查；到点就写 `stopped_budget` 并正常结束，下次从缓存继续。锁超时退出码是 2。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research collect-evidence \
+  --study-dir ./study \
+  --session-date 2026-11-07 \
+  --budget-seconds 300 \
+  --fees-path ./account_fees.json \
+  --fetch
+```
+
+费率文件只在本机读取。研究输出不复制费率数字，也不回写账户。`historically_applicable` 不是 true 时，费率不能用于可执行回测。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research daily-status \
+  --study-dir ./study --session-date 2026-11-07
+PYTHONPATH=src python -m xiao_a.cli research weekly-review \
+  --study-dir ./study --review-date 2026-11-14 \
+  --predictions ./saved-predictions.jsonl
+```
+
+周回顾在非重叠日期块少于 24 时不给方向命中率。概率不可用。单因子假设保持未应用。不要把 `study/` 提交进仓库。
+
 ## 测试
 
 ```bash
@@ -102,10 +159,12 @@ PYTHONPATH=src python -m unittest tests.test_research_diagnostics tests.test_res
 
 - `src/xiao_a/research_diagnostics.py`
 - `src/xiao_a/research_candidates.py`
+- `src/xiao_a/research_daily.py`
 - `src/xiao_a/cli.py`
 - `src/xiao_a/backtest.py`
 - `tests/test_research_diagnostics.py`
 - `tests/test_research_candidates.py`
+- `tests/test_research_daily.py`
 - `tests/test_backtest_constraints.py`
 - `tests/fixtures/research_backtest_spec.json`
 - `docs/RESEARCH_DIAGNOSTICS.md`

@@ -1347,6 +1347,11 @@ def run_research_command(args: Any) -> int:
                 cohort_annotations=args.cohort_annotations,
                 execution_spec=args.execution_spec,
             )
+        elif args.research_command in {
+            "sample-manifest", "sample-link", "shadow-freeze", "collect-evidence", "daily-status", "weekly-review",
+        }:
+            from xiao_a.research_daily import run_daily_command
+            return run_daily_command(args)
         else:
             raise ValueError("未知的研究子命令")
         text = json.dumps(report, ensure_ascii=False, indent=2)
