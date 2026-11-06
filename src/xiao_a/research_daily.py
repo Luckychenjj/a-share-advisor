@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import signal
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -37,6 +38,13 @@ OFFLINE_HYPOTHESIS = {
     "automatic_production_update": False,
     "note": "单因子假设只保留版本号，供线下回顾。这里不挑选、不校准、不改生产。",
 }
+HORIZON_SESSIONS = 5
+DEFAULT_RESEARCH_ROOT = Path(os.environ.get("XIAO_A_RESEARCH_DIR", "/workspace/xiao-a-research"))
+REUSE_POLICY = (
+    "刷新尚未覆盖决策日之后五个交易日的窗口；"
+    "已存满五个后续交易日的价格快照可以复用，但未核实成交条件时不能标成永久可信；"
+    "只有 verified_immutable 的快照才永久跳过。"
+)
 
 
 class StudyRefusal(ValueError):
@@ -375,10 +383,94 @@ def _extract_identity(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def append_sample_link(study_dir: Path, session_date: str, response: dict[str, Any], *, timeout_seconds: float = 5) -> dict[str, Any]:
+def snapshot_digest(record: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return the canonical snapshot hash, or a reason it cannot be verified."""
+    snapshot = record.get("input_snapshot")
+    declared = record.get("input_sha256")
+    if not isinstance(declared, str) or not declared.strip():
+        declared = None
+    digest = hashlib.sha256(_canonical(snapshot)).hexdigest() if snapshot is not None else None
+    if digest is not None and declared is not None and digest != declared:
+        return None, "snapshot_hash_conflict"
+    if digest is None:
+        return None, "snapshot_body_missing"
+    return digest, None
+
+
+def _audit_created_events(path: Path, prediction_id: str) -> list[dict[str, Any]]:
+    from xiao_a.research_diagnostics import read_audit_events
+    return [
+        event for event in read_audit_events(path)
+        if event.get("event_type") == "prediction_created" and event.get("prediction_id") == prediction_id
+    ]
+
+
+def join_response_identity(response: dict[str, Any], audit_path: Path | None = None) -> dict[str, Any]:
+    """Fill fingerprint and snapshot hash from one exact prediction id. Never guess by symbol or date."""
+    identity = _extract_identity(response)
+    if identity["confirmed"] or not identity["prediction_id"] or audit_path is None:
+        return identity
+    matches = _audit_created_events(audit_path, identity["prediction_id"])
+    if len(matches) != 1:
+        identity["confirmed"] = False
+        identity["join_reason"] = "duplicate_prediction_id" if len(matches) > 1 else "prediction_id_not_in_audit"
+        return identity
+    event = matches[0]
+    digest, problem = snapshot_digest(event)
+    if problem or not isinstance(event.get("fingerprint"), str):
+        identity["confirmed"] = False
+        identity["join_reason"] = problem or "audit_fingerprint_missing"
+        return identity
+    try:
+        audit_symbol = _canonical_symbol(str(event.get("symbol")))
+    except ValueError:
+        identity["confirmed"] = False
+        identity["join_reason"] = "audit_symbol_invalid"
+        return identity
+    if identity["symbol"]:
+        try:
+            response_symbol = _canonical_symbol(identity["symbol"])
+        except ValueError:
+            identity["confirmed"] = False
+            identity["join_reason"] = "response_symbol_invalid"
+            return identity
+        if response_symbol != audit_symbol:
+            identity["confirmed"] = False
+            identity["join_reason"] = "symbol_mismatch"
+            identity["symbol"] = response_symbol
+            return identity
+    response_day = shanghai_day(response.get("as_of") or (response.get("decision") or {}).get("as_of") or (response.get("prediction_audit") or {}).get("as_of"))
+    audit_day = shanghai_day(event.get("as_of") or event.get("information_cutoff"))
+    if response_day and audit_day and response_day != audit_day:
+        identity["confirmed"] = False
+        identity["join_reason"] = "as_of_mismatch"
+        return identity
+    identity.update(
+        fingerprint=event["fingerprint"],
+        snapshot_ref=digest,
+        symbol=audit_symbol,
+        confirmed=True,
+        missing_fields=[],
+        joined_from_audit=True,
+        join_reason=None,
+    )
+    return identity
+
+
+def append_sample_link(
+    study_dir: Path,
+    session_date: str,
+    response: dict[str, Any],
+    *,
+    timeout_seconds: float = 5,
+    audit_path: Path | None = None,
+) -> dict[str, Any]:
     manifest = load_frozen_manifest(study_dir, session_date)
     root = _session_dir(study_dir, session_date)
-    identity = _extract_identity(response)
+    before = audit_path.read_bytes() if audit_path is not None and audit_path.is_file() else None
+    identity = join_response_identity(response, audit_path)
+    if before is not None and audit_path.read_bytes() != before:
+        raise StudyRefusal("只读连接审计时审计文件被改写")
     try:
         symbol = _canonical_symbol(identity["symbol"]) if identity["symbol"] else None
     except ValueError:
@@ -395,15 +487,25 @@ def append_sample_link(study_dir: Path, session_date: str, response: dict[str, A
         "snapshot_ref": identity["snapshot_ref"],
         "confirmed": bool(identity["confirmed"] and in_plan),
         "status": "confirmed" if identity["confirmed"] and in_plan else "ambiguous",
-        "reason": None if identity["confirmed"] and in_plan else ("not_in_manifest" if identity["confirmed"] else "identity_incomplete"),
+        "reason": None if identity["confirmed"] and in_plan else (identity.get("join_reason") or ("not_in_manifest" if identity["confirmed"] else "identity_incomplete")),
         "missing_fields": identity["missing_fields"],
         "linked_at": _now(),
     }
     path = root / "links.jsonl"
     with study_lock(root, timeout_seconds):
         existing = _read_jsonl(path)
-        if record["confirmed"] and any(item.get("prediction_id") == record["prediction_id"] and item.get("confirmed") for item in existing):
-            return {"status": "unchanged", "confirmed": True, "prediction_id": record["prediction_id"]}
+        same_id = [item for item in existing if item.get("prediction_id") and item.get("prediction_id") == record["prediction_id"]]
+        if same_id:
+            conflicts = [
+                item for item in same_id
+                if item.get("fingerprint") != record["fingerprint"] or item.get("snapshot_ref") != record["snapshot_ref"] or item.get("symbol") != record["symbol"]
+            ]
+            if conflicts or not record["confirmed"]:
+                record["confirmed"] = False
+                record["status"] = "ambiguous"
+                record["reason"] = record["reason"] or "identity_conflict"
+            elif any(item.get("confirmed") for item in same_id):
+                return {"status": "unchanged", "confirmed": True, "prediction_id": record["prediction_id"]}
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return {"status": "appended", "confirmed": record["confirmed"], "reason": record["reason"], "prediction_id": record["prediction_id"]}
@@ -468,6 +570,12 @@ def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, time
             }
             _atomic_write(freeze_path, json.dumps(freeze, ensure_ascii=False, indent=2) + "\n")
         done = {item.get("prediction_id") for item in _read_jsonl(scores_path)}
+        confirmed = [item for item in links if item.get("confirmed") and item.get("prediction_id")]
+        counts: dict[tuple[str, str], set[str]] = {}
+        for item in confirmed:
+            counts.setdefault((str(item.get("symbol")), str(item.get("session_date"))), set()).add(str(item.get("prediction_id")))
+        duplicate_ids = {prediction_id for ids in counts.values() if len(ids) > 1 for prediction_id in ids}
+        conflict_ids = {str(item.get("prediction_id")) for item in links if item.get("reason") == "identity_conflict"}
         appended = 0
         ambiguous = 0
         with scores_path.open("a", encoding="utf-8") as handle:
@@ -475,17 +583,34 @@ def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, time
                 prediction_id = link.get("prediction_id")
                 if prediction_id in done:
                     continue
-                if not link.get("confirmed"):
+                if not link.get("confirmed") or prediction_id in duplicate_ids or prediction_id in conflict_ids:
                     ambiguous += 1
-                    handle.write(json.dumps({"prediction_id": prediction_id, "status": "ambiguous", "reason": link.get("reason")}, ensure_ascii=False) + "\n")
+                    reason = link.get("reason") or ("duplicate_symbol_day" if prediction_id in duplicate_ids else "identity_conflict")
+                    handle.write(json.dumps({"prediction_id": prediction_id, "status": "ambiguous", "reason": reason}, ensure_ascii=False) + "\n")
                     done.add(prediction_id)
                     appended += 1
                     continue
                 record = by_id.get(prediction_id)
-                if record is None or record.get("fingerprint") != link.get("fingerprint"):
+                digest, snapshot_problem = snapshot_digest(record or {})
+                if record is None or record.get("fingerprint") != link.get("fingerprint") or snapshot_problem or digest != link.get("snapshot_ref"):
                     ambiguous += 1
-                    reason = "missing_prediction" if record is None else "fingerprint_mismatch"
+                    if record is None:
+                        reason = "missing_prediction"
+                    elif record.get("fingerprint") != link.get("fingerprint"):
+                        reason = "fingerprint_mismatch"
+                    else:
+                        reason = snapshot_problem or "snapshot_mismatch"
                     handle.write(json.dumps({"prediction_id": prediction_id, "status": "ambiguous", "reason": reason}, ensure_ascii=False) + "\n")
+                    done.add(prediction_id)
+                    appended += 1
+                    continue
+                try:
+                    record_symbol = _canonical_symbol(str(record.get("symbol")))
+                except ValueError:
+                    record_symbol = None
+                if record_symbol != link.get("symbol"):
+                    ambiguous += 1
+                    handle.write(json.dumps({"prediction_id": prediction_id, "status": "ambiguous", "reason": "symbol_mismatch"}, ensure_ascii=False) + "\n")
                     done.add(prediction_id)
                     appended += 1
                     continue
@@ -541,17 +666,158 @@ def _evidence_shell(symbol: str, session_date: str) -> dict[str, Any]:
     }
 
 
-def _call_fetcher(fetcher: Any, symbol: str, adjustment: str, retries: int) -> dict[str, Any]:
-    last_error = "not_called"
-    for _ in range(max(1, retries)):
+def bounded_fetch(fetcher: Any, symbol: str, adjustment: str, timeout_seconds: float) -> dict[str, Any]:
+    """Run one provider call in a forked child that the parent can terminate."""
+    if timeout_seconds <= 0:
+        return {"status": "unavailable", "error": "budget_exhausted", "timed_out": True}
+    import tempfile
+    handle = tempfile.NamedTemporaryFile(prefix="xiao-a-fetch-", delete=False)
+    result_path = handle.name
+    handle.close()
+    pid = os.fork()
+    if pid == 0:
         try:
-            result = fetcher(symbol, adjustment)
-            if isinstance(result, dict):
-                return result
-            last_error = "fetcher_returned_non_object"
-        except Exception as exc:  # adapter failures stay explicit
-            last_error = f"{type(exc).__name__}: {exc}"
-    return {"status": "unavailable", "error": last_error}
+            try:
+                result = fetcher(symbol, adjustment)
+                payload = {"ok": True, "result": result if isinstance(result, dict) else {"status": "unavailable", "error": "fetcher_returned_non_object"}}
+            except Exception as exc:
+                payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            Path(result_path).write_text(json.dumps(payload), encoding="utf-8")
+        finally:
+            os._exit(0)
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    while True:
+        finished, _ = os.waitpid(pid, os.WNOHANG)
+        if finished == pid:
+            break
+        if time.monotonic() >= deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            timed_out = True
+            break
+        time.sleep(0.005)
+    try:
+        if timed_out:
+            return {"status": "unavailable", "error": "budget_exhausted", "timed_out": True}
+        try:
+            message = json.loads(Path(result_path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {"status": "unavailable", "error": "child_result_unreadable", "timed_out": False}
+        if not message.get("ok"):
+            return {"status": "unavailable", "error": message.get("error") or "fetch_failed", "timed_out": False}
+        result = message.get("result")
+        return result if isinstance(result, dict) else {"status": "unavailable", "error": "fetcher_returned_non_object", "timed_out": False}
+    finally:
+        try:
+            os.unlink(result_path)
+        except OSError:
+            pass
+
+
+def _stored_bars(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    bars = []
+    for series in snapshot.get("series") or []:
+        if isinstance(series, dict):
+            bars.extend(bar for bar in series.get("bars") or [] if isinstance(bar, dict))
+    return bars
+
+
+def _window_covered(snapshots: list[dict[str, Any]], decision_date: str) -> bool:
+    for snapshot in snapshots:
+        future = [bar for bar in _stored_bars(snapshot) if str(bar.get("trading_date") or "") > decision_date]
+        if snapshot.get("verified_immutable") is True and len(future) >= HORIZON_SESSIONS:
+            return True
+        if len(future) >= HORIZON_SESSIONS:
+            return True
+    return False
+
+
+def _session_manifests(study_dir: Path, through_date: str) -> list[dict[str, Any]]:
+    found = []
+    if not study_dir.exists():
+        return found
+    for child in sorted(path for path in study_dir.iterdir() if path.is_dir()):
+        try:
+            date.fromisoformat(child.name)
+        except ValueError:
+            continue
+        if child.name > through_date:
+            continue
+        try:
+            found.append(load_frozen_manifest(study_dir, child.name))
+        except StudyRefusal:
+            continue
+    return found
+
+
+def pending_collection_targets(study_dir: Path, session_date: str) -> list[dict[str, Any]]:
+    """Current membership plus earlier confirmed links whose five-session window is still open."""
+    targets: dict[str, dict[str, Any]] = {}
+    for manifest in _session_manifests(study_dir, session_date):
+        day = manifest["session_date"]
+        root = _session_dir(study_dir, day)
+        for item in manifest["membership"]:
+            slot = targets.setdefault(item["symbol"], {"symbol": item["symbol"], "sessions": [], "prediction_ids": []})
+            if day not in slot["sessions"]:
+                slot["sessions"].append(day)
+        for link in _read_jsonl(root / "links.jsonl"):
+            if not link.get("confirmed") or not link.get("symbol"):
+                continue
+            slot = targets.setdefault(link["symbol"], {"symbol": link["symbol"], "sessions": [], "prediction_ids": []})
+            if day not in slot["sessions"]:
+                slot["sessions"].append(day)
+            if link.get("prediction_id") not in slot["prediction_ids"]:
+                slot["prediction_ids"].append(link["prediction_id"])
+    pending = []
+    for symbol, slot in sorted(targets.items()):
+        snapshots = _symbol_snapshots(study_dir, symbol)
+        open_sessions = [day for day in slot["sessions"] if not _window_covered(snapshots, day)]
+        if open_sessions:
+            pending.append({**slot, "open_sessions": open_sessions})
+    return pending
+
+
+def _symbol_snapshots(study_dir: Path, symbol: str) -> list[dict[str, Any]]:
+    folder = study_dir / "evidence-snapshots" / symbol.replace(".", "_")
+    if not folder.exists():
+        return []
+    rows = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            rows.append(_read_json(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return rows
+
+
+def _series_from_fetch(fetched: dict[str, Any], requested_adjustment: str, captured_at: str) -> dict[str, Any]:
+    reported = fetched.get("price_basis") if isinstance(fetched.get("price_basis"), str) and fetched.get("price_basis") else None
+    bars = []
+    for bar in fetched.get("bars") or []:
+        if not isinstance(bar, dict):
+            continue
+        bars.append({
+            "trading_date": bar.get("trading_date"),
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+            "close": bar.get("close"),
+            "volume": bar.get("volume"),
+        })
+    return {
+        "requested_adjustment": requested_adjustment,
+        "actual_price_basis": reported or "unverified",
+        "requested_adjustment_is_not_proof_of_basis": True,
+        "status": fetched.get("status") or "unavailable",
+        "source": fetched.get("source"),
+        "source_url": fetched.get("source_url"),
+        "captured_at": captured_at,
+        "bars": bars,
+        "error": fetched.get("error"),
+        "exchange_limit_prices": "unavailable",
+        "usable_for_executable_backtest": False,
+    }
 
 
 def collect_evidence(
@@ -567,13 +833,12 @@ def collect_evidence(
 ) -> dict[str, Any]:
     manifest = load_frozen_manifest(study_dir, session_date)
     root = _session_dir(study_dir, session_date)
-    cache = root / "evidence-cache"
-    cache.mkdir(parents=True, exist_ok=True)
     deadline = clock() + max(0.0, budget_seconds)
-    symbols = [item["symbol"] for item in manifest["membership"]]
+    targets = pending_collection_targets(study_dir, session_date)
     stopped = False
     written = 0
     reused = 0
+    attempts = 0
     fees = {"path_supplied": fees_path is not None, "historically_applicable": False, "rates_copied_into_study": False, "sha256": None}
     if fees_path is not None and fees_path.is_file():
         blob = fees_path.read_bytes()
@@ -583,54 +848,101 @@ def collect_evidence(
             fees["historically_applicable"] = payload.get("historically_applicable") is True
         except (UnicodeDecodeError, json.JSONDecodeError):
             fees["historically_applicable"] = False
-    for symbol in symbols:
-        if clock() >= deadline:
+    pending_left = [item["symbol"] for item in targets]
+    for target in targets:
+        remaining = deadline - clock()
+        if remaining <= 0:
             stopped = True
             break
-        target = cache / f"{symbol.replace('.', '_')}.json"
-        with study_lock(root, timeout_seconds):
-            if target.exists():
-                reused += 1
-                continue
-        evidence = _evidence_shell(symbol, session_date)
-        evidence["fees"] = fees
+        symbol = target["symbol"]
         if fetcher is None:
-            evidence["raw_ohlc"] = {"status": "unavailable", "reason": "public_adapter_not_invoked"}
-            evidence["adjusted_ohlc"] = {"status": "unavailable", "reason": "public_adapter_not_invoked"}
-            evidence["blockers"].append("public_adapter_not_invoked")
-        else:
-            for label, adjustment in (("raw_ohlc", "none"), ("adjusted_ohlc", "qfq")):
-                fetched = _call_fetcher(fetcher, symbol, adjustment, retries)
-                evidence[label] = {
-                    "status": fetched.get("status") or "unavailable",
-                    "source": fetched.get("source"),
-                    "bar_count": len(fetched.get("bars") or []),
-                    "error": fetched.get("error"),
-                    "adapter_limit_rate_ignored": True,
-                }
-            evidence["blockers"].append("adapter_prices_are_not_verified_execution_evidence")
-        evidence["usable_for_executable_backtest"] = False
-        with study_lock(root, timeout_seconds):
-            if target.exists():
-                reused += 1
-                continue
-            _atomic_write(target, json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
+            snapshot = _evidence_shell(symbol, session_date)
+            snapshot["series"] = []
+            snapshot["blockers"].append("public_adapter_not_invoked")
+            snapshot["fees"] = fees
+            snapshot["reuse_policy"] = REUSE_POLICY
+            _write_snapshot(study_dir, symbol, snapshot)
             written += 1
+            pending_left.remove(symbol)
+            continue
+        series = []
+        timed_out = False
+        for adjustment in ("none", "qfq"):
+            remaining = deadline - clock()
+            if remaining <= 0:
+                timed_out = True
+                stopped = True
+                break
+            fetched = None
+            for _attempt in range(max(1, retries)):
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    timed_out = True
+                    stopped = True
+                    break
+                attempts += 1
+                fetched = bounded_fetch(fetcher, symbol, adjustment, remaining)
+                if fetched.get("timed_out"):
+                    stopped = True
+                    timed_out = True
+                    break
+                if fetched.get("status") != "unavailable":
+                    break
+            if fetched is None:
+                break
+            series.append(_series_from_fetch(fetched, adjustment, _now()))
+            if fetched.get("timed_out"):
+                break
+        snapshot = _evidence_shell(symbol, session_date)
+        snapshot["series"] = series
+        snapshot["timed_out"] = timed_out
+        snapshot["refresh_required"] = timed_out or not _window_covered([snapshot], min(target["open_sessions"]))
+        snapshot["verified_immutable"] = False
+        snapshot["fees"] = fees
+        snapshot["reuse_policy"] = REUSE_POLICY
+        snapshot["blockers"].append("adapter_prices_are_not_verified_execution_evidence")
+        snapshot["net_pnl"] = {"status": "unavailable", "total_return": None}
+        _write_snapshot(study_dir, symbol, snapshot)
+        written += 1
+        if symbol in pending_left and not snapshot["refresh_required"]:
+            pending_left.remove(symbol)
+        if stopped:
+            break
+    covered = [item["symbol"] for item in targets if item["symbol"] not in pending_left]
     status = {
         "schema": SCHEMA_EVIDENCE,
         "session_date": session_date,
         "manifest_sha256": manifest["identity_sha256"],
         "stopped_budget": stopped,
         "budget_seconds": budget_seconds,
-        "symbols_total": len(symbols),
+        "symbols_total": len(targets),
+        "symbols_selected": [item["symbol"] for item in targets],
         "symbols_written": written,
         "symbols_reused": reused,
+        "pending_symbols": pending_left,
+        "covered_symbols": covered,
+        "fetcher_attempts": attempts,
         "usable_for_executable_backtest": 0,
         "probability_available": False,
+        "reuse_policy": REUSE_POLICY,
         "fees": fees,
+        "net_pnl": {"status": "unavailable", "total_return": None},
     }
     _atomic_write(root / "evidence-status.json", json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+    _atomic_write(study_dir / "enrollment-index.json", json.dumps({
+        "through_date": session_date,
+        "targets": targets,
+        "pending_symbols": pending_left,
+        "derived_from_session_sidecars": True,
+    }, ensure_ascii=False, indent=2) + "\n")
     return status
+
+
+def _write_snapshot(study_dir: Path, symbol: str, snapshot: dict[str, Any]) -> None:
+    folder = study_dir / "evidence-snapshots" / symbol.replace(".", "_")
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(_SHANGHAI).strftime("%Y%m%dT%H%M%S%f")
+    _atomic_write(folder / f"{stamp}.json", json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
 
 
 def daily_status(study_dir: Path, session_date: str) -> dict[str, Any]:
@@ -701,9 +1013,21 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
     }
 
 
+def _resolve_study_dir(args: Any) -> Path:
+    chosen = getattr(args, "study_dir", None)
+    if chosen is not None:
+        return chosen
+    study_id = getattr(args, "study_id", None)
+    if not isinstance(study_id, str) or not study_id.strip() or "/" in study_id or "\\" in study_id:
+        raise StudyRefusal("需要 --study-dir，或简单的 --study-id；默认目录是 /workspace/xiao-a-research/<study-id>")
+    return DEFAULT_RESEARCH_ROOT / study_id.strip()
+
+
 def run_daily_command(args: Any) -> int:
     try:
         command = args.research_command
+        if command != "retrospective-market-bucket":
+            args.study_dir = _resolve_study_dir(args)
         if command == "sample-manifest":
             from datetime import datetime
             from xiao_a.research_study_extensions import assert_prospective_session, classify_market_bucket
@@ -741,7 +1065,11 @@ def run_daily_command(args: Any) -> int:
             response = _read_json(args.response)
             if not isinstance(response, dict):
                 raise StudyRefusal("评估响应必须是 JSON 对象")
-            result = append_sample_link(args.study_dir, args.session_date, response)
+            result = append_sample_link(
+                _resolve_study_dir(args), args.session_date, response,
+                timeout_seconds=getattr(args, "lock_timeout_seconds", 5),
+                audit_path=getattr(args, "audit", None),
+            )
         elif command == "shadow-freeze":
             result = freeze_shadow(args.study_dir, args.session_date, args.predictions, timeout_seconds=args.lock_timeout_seconds)
         elif command == "collect-evidence":
@@ -791,7 +1119,13 @@ def _public_fetcher():
         return {
             "status": result.status.value,
             "source": result.provenance.source if result.provenance else None,
-            "bars": [{"trading_date": bar.trading_date.isoformat()} for bar in result.bars],
+            "source_url": result.provenance.source_url if result.provenance else None,
+            "requested_adjustment": adjustment,
+            "price_basis": None,
+            "bars": [{
+                "trading_date": bar.trading_date.isoformat(),
+                "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "volume": bar.volume,
+            } for bar in result.bars],
             "error": "; ".join(result.errors) or None,
         }
 

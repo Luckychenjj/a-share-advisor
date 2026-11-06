@@ -14,6 +14,8 @@ tmps*/
 .local-recovery/
 
 # ---- Personal data: never commit ----
+# Prospective-study sidecars live outside the packaged tree. Do not ignore a generic study/ path.
+/xiao-a-research/
 userdata/
 /data/
 reviews/

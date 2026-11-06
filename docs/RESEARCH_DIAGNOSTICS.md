@@ -106,13 +106,23 @@ PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
 
 退出码 0 表示清单已创建或内容相同；退出码 2 表示清单已冻结却被换成另一套成员。同一天再跑不会重抽随机样本。
 
-评估仍由现有调用方逐只执行。每次评估之后，把同一次响应里的预测 ID、指纹和快照引用交给链接命令。只有这三项都在、并且代码属于已冻结清单时才算确认。只有代码和日期、或指纹对不上，会追加一条 `ambiguous`，不会猜。同一预测 ID 重复追加是无操作；同一天另一次评估的另一个预测 ID 会再追加，不会替换清单。
+评估仍由现有调用方逐只执行。自动评估响应通常只有预测 ID。链接命令可以用 `--audit` 只读台账里同一 ID 的 `prediction_created`，补上规范指纹和 `input_sha256`。代码或截止日期对不上就是 `ambiguous`，不会按代码加日期去猜。同一 ID 如果指纹或快照引用变了，不能当作原链接未变化。同一代码同一天有两个预测 ID 时，影子分数两边都不计，避免悄悄二选一。
+
+研究目录不要放在可打包的 `study/` 下面。默认是 `/workspace/xiao-a-research/<study-id>`，仓库只忽略这个具体路径。
+
+证据采集会跨日期继续未完成的五日窗口，并把原始返回的 OHLC 留在版本化快照里。请求参数 `none` 不会被写成“未复权”。单次请求超过剩余预算时，子进程会被终止。外层还可以用系统 `timeout`：
+
+```bash
+timeout 300 python -m xiao_a.cli research collect-evidence \
+  --study-id demo --session-date 2026-11-07 --budget-seconds 240 --fetch
+```
 
 ```bash
 PYTHONPATH=src python -m xiao_a.cli research sample-link \
-  --study-dir ./study \
+  --study-id demo \
   --session-date 2026-11-07 \
-  --response ./one-eval.json
+  --response ./one-eval.json \
+  --audit "$XIAO_A_AUDIT_FILE"
 ```
 
 影子命令只读清单、链接和已保存的预测记录，不重新拉行情、不重算因子。配置指纹、代码版本和 `prospective_shadow_start` 第一次写入后不变。分数侧车不含结算标签。映射不确定就标 `ambiguous`。
