@@ -108,7 +108,7 @@ PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
 
 评估仍由现有调用方逐只执行。自动评估响应通常只有预测 ID。链接命令可以用 `--audit` 只读台账里同一 ID 的 `prediction_created`，补上规范指纹和 `input_sha256`。代码或截止日期对不上就是 `ambiguous`，不会按代码加日期去猜。同一 ID 如果指纹或快照引用变了，不能当作原链接未变化。同一代码同一天有两个预测 ID 时，影子分数两边都不计，避免悄悄二选一。
 
-研究目录不要放在可打包的 `study/` 下面。默认是 `/workspace/xiao-a-research/<study-id>`，仓库只忽略这个具体路径。
+研究目录的默认位置是 `/workspace/xiao-a-research/<study-id>`。这个绝对路径靠放在克隆外面隔离。`.gitignore` 不能忽略仓库外的绝对路径。`/xiao-a-research/` 只在克隆根目录下出现同名文件夹时生效。如果误把 `--study-dir` 指到仓库里的 `study/`，被忽略的是仓库相对路径 `/study/`，不是外面的默认目录。
 
 证据采集会跨日期继续未完成的五日窗口，并把原始返回的 OHLC 留在版本化快照里。请求参数 `none` 不会被写成“未复权”。单次请求超过剩余预算时，子进程会被终止。外层还可以用系统 `timeout`：
 
@@ -125,7 +125,7 @@ PYTHONPATH=src python -m xiao_a.cli research sample-link \
   --audit "$XIAO_A_AUDIT_FILE"
 ```
 
-影子命令只读清单、链接和已保存的预测记录，不重新拉行情、不重算因子。配置指纹、代码版本和 `prospective_shadow_start` 第一次写入后不变。分数侧车不含结算标签。映射不确定就标 `ambiguous`。
+影子命令只读清单、链接和已保存的预测记录，不重新拉行情、不重算因子。配置指纹、代码版本和 `prospective_shadow_start` 第一次写入后不变。分数侧车不含结算标签。映射不确定就标 `ambiguous`。已经记成 `scored` 的行不改写。如果同一预测 ID 后来出现不同指纹或快照，或者同一代码同一天出现第二个预测 ID，影子文件只追加 `status=invalidated`。日状态、周回顾和相对结算的有效视图都排除这一组里的原记录和新记录，重复运行不会再追加同样的失效行。
 
 ```bash
 PYTHONPATH=src python -m xiao_a.cli research shadow-freeze \
@@ -155,18 +155,50 @@ PYTHONPATH=src python -m xiao_a.cli research weekly-review \
   --predictions ./saved-predictions.jsonl
 ```
 
-周回顾在非重叠日期块少于 24 时不给方向命中率。概率不可用。单因子假设保持未应用。不要把 `study/` 提交进仓库。
+周回顾在非重叠日期块少于 24 时不给方向命中率。概率不可用。单因子假设保持未应用。v2 周回顾另外按冻结的市场状态分栏，每栏自己的 24 块门槛在 `bucket_reports.<bucket>.evidence`。相对结算文件缺失的日期列在 `missing_relative_sessions`，不会被补成超额收益。
 
 ## 相对沪深300与市场状态
 
 这两项只属于 `research-study-v2`。已有的 v1 清单不会被改写。过去的交易日也不能补成前瞻研究。规则在抽样前固定：沪深300收盘高于包含当日的20日简单均线，并且5日收盘收益大于0，为强；两者都严格小于为弱；其余已核实的情况为震荡，相等算震荡。指数历史不足、来源未核实，或快照里有截止日之后的K线，就拒绝或记为不可用，不会当成震荡，也不从 `market_regime` 分数推断。
+
+抽样时冻结的状态写入清单 `study_extension.bucket`。影子冻结读取这个字段，写到 `shadow-freeze.json` 的 `frozen_market_bucket`，并抄到每条 `shadow-scores.jsonl`。证据状态和 `enrollment-index.json` 的 `sessions[]` 也带同一字段。这些侧车不重新读取后来的指数文件。
+
+相对结算读取已冻结清单和已确认链接，把结果追加到 `relative-settlements.jsonl`。生产目标不变。缺公司行为核实、缺同步端点、预测不在确认链接里，或冻结状态是 `unavailable`，该行 `status` 为 `refused`，`outcome.excess_return` 不作为可用结果。同一预测 ID 的结算内容变了，记为 `settlement_conflict`，不覆盖原行。未满 24 个非重叠块时 `relative_hit_rate` 为 null。
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research relative-study \
+  --study-dir /workspace/xiao-a-research/demo \
+  --session-date 2026-11-07 \
+  --labels ./relative-labels.json
+```
+
+标签文件是 `{"labels":[{"prediction_id","symbol","information_cutoff","stock":{"corporate_actions_verified","price_basis","source","fetched_at","entry_date","entry_open","exit_date","exit_close"},"index":{"symbol":"SH.000300","price_basis":"price_index","provenance_verified","entry_date","entry_open","exit_date","exit_close"}}]}`。
+
+输出字段：
+
+| 路径 | 含义 |
+| --- | --- |
+| `sessions/<date>/manifest.json` → `study_extension.bucket` | 抽样时冻结的强、弱、震荡或不可用 |
+| `enrollment-index.json` → `sessions[].frozen_market_bucket` | 跨日登记里的同一状态 |
+| `sessions/<date>/shadow-freeze.json` → `frozen_market_bucket` | 影子配置抄录的状态 |
+| `sessions/<date>/shadow-scores.jsonl` → `frozen_market_bucket` | 每条影子分数上的状态，不含未来标签 |
+| `sessions/<date>/relative-settlements.jsonl` → `outcome.excess_return` | 已核实的相对收益；拒绝行看 `status` 和 `reason` |
+| `weekly-reviews/<review-date>.json` → `bucket_reports.<bucket>.evidence.minimum_monitoring_blocks` | 该状态自己的 24 块门槛 |
+| `evidence-snapshots/<SYMBOL>/<stamp>.json` → `series[].bars` | 已保存的 OHLC，不证明可执行回测 |
+
+```bash
+PYTHONPATH=src python -m xiao_a.cli research weekly-review \
+  --study-dir /workspace/xiao-a-research/demo \
+  --review-date 2026-11-21 \
+  --predictions ./saved-predictions.jsonl
+```
 
 相对目标仍是下一交易日开盘到第五个交易日收盘，再用同一日期的沪深300价格指数开盘和收盘相减。股票端必须有已核实的公司行为可比收益。指数必须是 `SH.000300` 价格指数，不能用 ETF 代替。缺任一端点则相对结果不可用。超额收益不是个股阿尔法证明。样本外多数类只看更早的参照段；全样本多数类只是命名过的描述上限。每个市场状态自己计算24块门槛。
 
 ```bash
 PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
   --session-date 2026-11-07 \
-  --study-dir ./study-v2 \
+  --study-dir /workspace/xiao-a-research/demo \
   --pool ./pool.txt \
   --universe ./a-share-snapshot.json \
   --study-definition research-study-v2 \

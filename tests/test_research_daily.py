@@ -16,6 +16,7 @@ from xiao_a.research_daily import (
     daily_status,
     freeze_shadow,
     load_frozen_manifest,
+    settle_relative_labels,
     study_lock,
     weekly_review,
     write_sample_manifest,
@@ -349,6 +350,203 @@ class DailyStudyTests(unittest.TestCase):
             text = (study / "2026-11-07" / "shadow-scores.jsonl").read_text(encoding="utf-8")
             self.assertNotIn("\"status\": \"scored\"", text)
             self.assertGreater(scored["ambiguous"], 0)
+
+    def test_v2_bucket_is_on_daily_sidecars_and_weekly_gate(self):
+        with self._tmp() as root:
+            from xiao_a.prediction_audit import TARGET_DEFINITION, _canonical
+            from xiao_a.research_study_extensions import classify_market_bucket
+            import hashlib
+            extension = classify_market_bucket({
+                "symbol": "SH.000300", "instrument": "price_index", "price_basis": "price_index",
+                "provenance_verified": True, "source": "local", "source_url": "https://example.test/csi300",
+                "fetched_at": "2026-11-07T15:10:00+08:00", "as_of": "2026-11-07",
+                "bars": [{"trading_date": (date(2026, 10, 19) + timedelta(days=i)).isoformat(), "close": 100 if i < 19 else 110, "open": 100} for i in range(20)],
+            }, "2026-11-07")
+            self.assertEqual(extension["bucket"], "strong")
+            study = root / "study"
+            manifest = build_sample_manifest(
+                session_date="2026-11-07", pool_symbols=["SH.600000", "SZ.000001"], pool_sha256="p", pool_rejected=0,
+                holdings={"status": "not_supplied", "symbols": []},
+                universe={"file_sha256": "u", "as_of": "2026-11-07", "fetched_at": None, "source": "bare_list", "rejected_rows": 0, "records": [{"symbol": "SH.600000"}, {"symbol": "SZ.000001"}]},
+                random_count=0, seed="20261107", study_extension=extension,
+            )
+            write_sample_manifest(study, manifest)
+            snapshot = {"features": {"trend": 1}}
+            digest = hashlib.sha256(_canonical(snapshot)).hexdigest()
+            append_sample_link(study, "2026-11-07", {
+                "symbol": "SH.600000", "prediction_id": "pid", "fingerprint": "fp", "snapshot_ref": digest,
+            })
+            append_sample_link(study, "2026-11-07", {
+                "symbol": "SZ.000001", "prediction_id": "pid2", "fingerprint": "fp2", "snapshot_ref": digest,
+            })
+            predictions = root / "predictions.jsonl"
+            predictions.write_text("".join(json.dumps(row) + "\n" for row in (
+                {"prediction_id": "pid", "fingerprint": "fp", "symbol": "SH.600000", "as_of": "2026-11-07T15:00:00+08:00", "input_snapshot": snapshot, "input_sha256": digest, "rule_score": 0.4, "submodel_scores": {"multi_factor": 0.4}},
+                {"prediction_id": "pid2", "fingerprint": "fp2", "symbol": "SZ.000001", "as_of": "2026-11-07T15:00:00+08:00", "input_snapshot": snapshot, "input_sha256": digest, "rule_score": 0.4, "submodel_scores": {"multi_factor": 0.4}},
+            )), encoding="utf-8")
+            frozen = freeze_shadow(study, "2026-11-07", predictions)
+            self.assertEqual(frozen["frozen_market_bucket"], "strong")
+            self.assertEqual(frozen["relative_target_id"], "forward_excess_csi300_5_sessions_v1")
+            freeze_body = json.loads((study / "2026-11-07" / "shadow-freeze.json").read_text(encoding="utf-8"))
+            self.assertEqual(freeze_body["frozen_market_bucket"], "strong")
+            self.assertFalse(freeze_body["bucket_recomputed_from_later_index"])
+            scores = (study / "2026-11-07" / "shadow-scores.jsonl").read_text(encoding="utf-8")
+            self.assertIn("\"frozen_market_bucket\": \"strong\"", scores)
+            self.assertNotIn("excess_return", scores)
+            collect_evidence(study, "2026-11-07", budget_seconds=5, fetcher=None)
+            enrolled = json.loads((study / "enrollment-index.json").read_text(encoding="utf-8"))
+            self.assertEqual(enrolled["sessions"][0]["frozen_market_bucket"], "strong")
+            from xiao_a.research_daily import settle_relative_labels
+            settled = settle_relative_labels(study, "2026-11-07", [
+                {
+                    "prediction_id": "pid", "symbol": "SH.600000", "information_cutoff": "2026-11-07T15:00:00+08:00",
+                    "stock": {"entry_date": "2026-11-10", "entry_open": 10, "exit_date": "2026-11-14", "exit_close": 11, "price_basis": "qfq", "corporate_actions_verified": True, "source": "local", "fetched_at": "2026-11-14T16:00:00+08:00"},
+                    "index": {"symbol": "SH.000300", "price_basis": "price_index", "provenance_verified": True, "entry_date": "2026-11-10", "entry_open": 100, "exit_date": "2026-11-14", "exit_close": 100},
+                },
+                {
+                    "prediction_id": "pid2", "symbol": "SZ.000001", "information_cutoff": "2026-11-07",
+                    "stock": {"corporate_actions_verified": False}, "index": {},
+                },
+            ])
+            self.assertIsNone(settled["relative_hit_rate"])
+            self.assertEqual(settled["evidence"]["minimum_monitoring_blocks"], 24)
+            self.assertTrue(settled["evidence"]["insufficient_evidence"])
+            self.assertFalse(settled["production_target_modified"])
+            rows = (study / "2026-11-07" / "relative-settlements.jsonl").read_text(encoding="utf-8")
+            self.assertIn("\"status\": \"settled\"", rows)
+            self.assertIn("stock_corporate_actions_not_verified", rows)
+            review = weekly_review(study, "2026-11-21", predictions)
+            self.assertEqual(review["bucket_reports"]["strong"]["eligible_relative_rows"], 1)
+            self.assertEqual(review["bucket_reports"]["weak"]["eligible_relative_rows"], 0)
+            self.assertEqual(review["bucket_reports"]["strong"]["evidence"]["minimum_monitoring_blocks"], 24)
+            self.assertIsNone(review["bucket_reports"]["strong"]["relative_hit_rate"])
+            self.assertTrue((study / "weekly-reviews" / "2026-11-21.json").is_file())
+            self.assertEqual(TARGET_DEFINITION["target_id"], "forward_positive_return_5_sessions_v1")
+            patterns = [line.strip() for line in Path(".gitignore").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+            self.assertIn("/study/", patterns)
+            self.assertNotIn("/workspace/xiao-a-research", patterns)
+            self.assertNotIn("/workspace/xiao-a-research/", patterns)
+            with self.assertRaises(StudyRefusal):
+                plain = root / "plain"
+                plain_manifest = build_sample_manifest(
+                    session_date="2026-11-07", pool_symbols=["SH.600000"], pool_sha256="p", pool_rejected=0,
+                    holdings={"status": "not_supplied", "symbols": []},
+                    universe={"file_sha256": "u", "as_of": "2026-11-07", "fetched_at": None, "source": "bare_list", "rejected_rows": 0, "records": [{"symbol": "SH.600000"}]},
+                    random_count=0, seed="20261107",
+                )
+                write_sample_manifest(plain, plain_manifest)
+                settle_relative_labels(plain, "2026-11-07", [])
+
+    def test_late_conflict_and_duplicate_drop_out_of_every_view(self):
+        with self._tmp() as root:
+            from xiao_a.prediction_audit import _canonical
+            import hashlib
+            study = root / "study"
+            manifest = _manifest(root)
+            symbol = next(item["symbol"] for item in manifest["membership"] if "fixed_pool" in item["buckets"])
+            snapshot = {"features": {"trend": 1}}
+            digest = hashlib.sha256(_canonical(snapshot)).hexdigest()
+            audit = root / "audit.jsonl"
+            audit.write_text('{"event_type":"prediction_created","prediction_id":"SYN-1"}\n', encoding="utf-8")
+            before = audit.read_bytes()
+
+            def prediction(prediction_id: str, fingerprint: str) -> dict:
+                return {
+                    "prediction_id": prediction_id, "fingerprint": fingerprint, "symbol": symbol,
+                    "as_of": "2026-11-07T15:00:00+08:00", "information_cutoff": "2026-11-07T15:00:00+08:00",
+                    "input_snapshot": snapshot, "input_sha256": digest, "score_type": "rule_conformance_score",
+                    "rule_score": 0.4, "submodel_scores": {"multi_factor": 0.4},
+                    "settlement": {"event_occurred": True, "exit_date": "2026-11-14"},
+                }
+
+            predictions = root / "predictions.jsonl"
+            predictions.write_text(json.dumps(prediction("SYN-1", "fp")) + "\n", encoding="utf-8")
+            append_sample_link(study, "2026-11-07", {
+                "symbol": symbol, "prediction_id": "SYN-1", "fingerprint": "fp", "snapshot_ref": digest,
+            }, audit_path=audit)
+            first = freeze_shadow(study, "2026-11-07", predictions)
+            self.assertEqual(first["effective_scored"], 1)
+            counted = weekly_review(study, "2026-11-21", predictions)
+            self.assertEqual(counted["matured_rows"], 1)
+            self.assertEqual(counted["nonoverlapping_date_blocks"], 1)
+            conflict = append_sample_link(study, "2026-11-07", {
+                "symbol": symbol, "prediction_id": "SYN-1", "fingerprint": "other", "snapshot_ref": digest,
+            }, audit_path=audit)
+            self.assertEqual(conflict["reason"], "identity_conflict")
+            self.assertEqual(audit.read_bytes(), before)
+            hidden = weekly_review(study, "2026-11-21", predictions)
+            self.assertEqual(hidden["matured_rows"], 0)
+            self.assertEqual(hidden["nonoverlapping_date_blocks"], 0)
+            self.assertEqual(hidden["invalidations"], [{"session_date": "2026-11-07", "prediction_id": "SYN-1", "reason": "identity_conflict"}])
+            rerun = freeze_shadow(study, "2026-11-07", predictions)
+            self.assertGreater(rerun["appended"], 0)
+            self.assertEqual(rerun["effective_scored"], 0)
+            self.assertEqual(rerun["invalidations"][0]["reason"], "identity_conflict")
+            again = freeze_shadow(study, "2026-11-07", predictions)
+            self.assertEqual(again["appended"], 0)
+            self.assertEqual(again["invalidations"], rerun["invalidations"])
+            raw = (study / "2026-11-07" / "shadow-scores.jsonl").read_text(encoding="utf-8")
+            self.assertIn("\"status\": \"scored\"", raw)
+            self.assertIn("\"status\": \"invalidated\"", raw)
+            status = daily_status(study, "2026-11-07")
+            self.assertEqual(status["shadow_scored"], 0)
+            self.assertEqual(status["invalidations"][0]["prediction_id"], "SYN-1")
+            self.assertEqual(weekly_review(study, "2026-11-21", predictions)["matured_rows"], 0)
+
+            other = root / "duplicate"
+            duplicate_manifest = build_sample_manifest(
+                session_date="2026-11-07", pool_symbols=[symbol], pool_sha256="p", pool_rejected=0,
+                holdings={"status": "not_supplied", "symbols": []},
+                universe={"file_sha256": "u", "as_of": "2026-11-07", "fetched_at": None, "source": "bare_list", "rejected_rows": 0, "records": [{"symbol": symbol}]},
+                random_count=0, seed="dup",
+            )
+            write_sample_manifest(other, duplicate_manifest)
+            other_predictions = root / "duplicate-predictions.jsonl"
+            other_predictions.write_text(json.dumps(prediction("SYN-1", "fp")) + "\n" + json.dumps(prediction("SYN-2", "fp2")) + "\n", encoding="utf-8")
+            append_sample_link(other, "2026-11-07", {"symbol": symbol, "prediction_id": "SYN-1", "fingerprint": "fp", "snapshot_ref": digest})
+            freeze_shadow(other, "2026-11-07", other_predictions)
+            append_sample_link(other, "2026-11-07", {"symbol": symbol, "prediction_id": "SYN-2", "fingerprint": "fp2", "snapshot_ref": digest})
+            late = freeze_shadow(other, "2026-11-07", other_predictions)
+            self.assertEqual(late["effective_scored"], 0)
+            self.assertEqual({item["prediction_id"] for item in late["invalidations"]}, {"SYN-1", "SYN-2"})
+            self.assertTrue(all(item["reason"] == "duplicate_symbol_day" for item in late["invalidations"]))
+            repeated = freeze_shadow(other, "2026-11-07", other_predictions)
+            self.assertEqual(repeated["appended"], 0)
+            review = weekly_review(other, "2026-11-21", other_predictions)
+            self.assertEqual(review["matured_rows"], 0)
+            self.assertEqual(review["nonoverlapping_date_blocks"], 0)
+            self.assertEqual({item["prediction_id"] for item in review["invalidations"]}, {"SYN-1", "SYN-2"})
+            self.assertEqual(daily_status(other, "2026-11-07")["shadow_scored"], 0)
+
+            from xiao_a.research_study_extensions import classify_market_bucket
+            extension = classify_market_bucket({
+                "symbol": "SH.000300", "instrument": "price_index", "price_basis": "price_index",
+                "provenance_verified": True, "source": "local", "source_url": "https://example.test/csi300",
+                "fetched_at": "2026-11-07T15:10:00+08:00", "as_of": "2026-11-07",
+                "bars": [{"trading_date": (date(2026, 10, 19) + timedelta(days=i)).isoformat(), "close": 100 if i < 19 else 110, "open": 100} for i in range(20)],
+            }, "2026-11-07")
+            relative = root / "relative"
+            relative_manifest = build_sample_manifest(
+                session_date="2026-11-07", pool_symbols=[symbol], pool_sha256="p", pool_rejected=0,
+                holdings={"status": "not_supplied", "symbols": []},
+                universe={"file_sha256": "u", "as_of": "2026-11-07", "fetched_at": None, "source": "bare_list", "rejected_rows": 0, "records": [{"symbol": symbol}]},
+                random_count=0, seed="rel", study_extension=extension,
+            )
+            write_sample_manifest(relative, relative_manifest)
+            append_sample_link(relative, "2026-11-07", {"symbol": symbol, "prediction_id": "SYN-1", "fingerprint": "fp", "snapshot_ref": digest})
+            label = {
+                "prediction_id": "SYN-1", "symbol": symbol, "information_cutoff": "2026-11-07T15:00:00+08:00",
+                "stock": {"entry_date": "2026-11-10", "entry_open": 10, "exit_date": "2026-11-14", "exit_close": 11, "price_basis": "qfq", "corporate_actions_verified": True, "source": "local", "fetched_at": "2026-11-14T16:00:00+08:00"},
+                "index": {"symbol": "SH.000300", "price_basis": "price_index", "provenance_verified": True, "entry_date": "2026-11-10", "entry_open": 100, "exit_date": "2026-11-14", "exit_close": 100},
+            }
+            self.assertEqual(settle_relative_labels(relative, "2026-11-07", [label])["eligible_relative_rows"], 1)
+            append_sample_link(relative, "2026-11-07", {"symbol": symbol, "prediction_id": "SYN-1", "fingerprint": "other", "snapshot_ref": digest})
+            after = settle_relative_labels(relative, "2026-11-07", [label])
+            self.assertEqual(after["eligible_relative_rows"], 0)
+            self.assertEqual(after["relative_hit_rate"], None)
+            self.assertEqual(after["invalidations"][0]["reason"], "identity_conflict")
+            self.assertEqual(after["rows_appended"], 0)
+            self.assertEqual(settle_relative_labels(relative, "2026-11-07", [label])["rows_appended"], 0)
 
     def _tmp(self):
         import tempfile

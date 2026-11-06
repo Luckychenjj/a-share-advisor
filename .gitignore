@@ -14,8 +14,11 @@ tmps*/
 .local-recovery/
 
 # ---- Personal data: never commit ----
-# Prospective-study sidecars live outside the packaged tree. Do not ignore a generic study/ path.
+# /xiao-a-research/ matches only that directory name at the root of a clone.
+# It does not ignore the absolute path /workspace/xiao-a-research outside a clone.
+# /study/ is the repo-relative output from a mistaken --study-dir study.
 /xiao-a-research/
+/study/
 userdata/
 /data/
 reviews/

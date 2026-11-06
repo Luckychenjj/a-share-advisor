@@ -32,6 +32,17 @@ SCHEMA_SHADOW = "xiao_a_shadow_freeze_v1"
 SCHEMA_EVIDENCE = "xiao_a_evidence_v1"
 SCHEMA_DAILY = "xiao_a_daily_status_v1"
 SCHEMA_WEEKLY = "xiao_a_weekly_review_v1"
+SCHEMA_RELATIVE = "xiao_a_relative_settlement_v1"
+OUTPUT_FIELD_PATHS = {
+    "enrollment_bucket": "sessions/<date>/manifest.json -> study_extension.bucket",
+    "enrollment_index_bucket": "enrollment-index.json -> sessions[].frozen_market_bucket",
+    "shadow_bucket": "sessions/<date>/shadow-freeze.json -> frozen_market_bucket",
+    "shadow_score_bucket": "sessions/<date>/shadow-scores.jsonl -> frozen_market_bucket",
+    "relative_outcome": "sessions/<date>/relative-settlements.jsonl -> outcome.excess_return",
+    "relative_refusal": "sessions/<date>/relative-settlements.jsonl -> status, reason",
+    "weekly_bucket_gate": "weekly-reviews/<review-date>.json -> bucket_reports.<bucket>.evidence.minimum_monitoring_blocks",
+    "evidence_bars": "evidence-snapshots/<SYMBOL>/<stamp>.json -> series[].bars",
+}
 OFFLINE_HYPOTHESIS = {
     "id": "single-factor-offline-v1",
     "status": "not_applied",
@@ -351,6 +362,32 @@ def _write_sample_manifest_locked(path: Path, lock: Path, manifest: dict[str, An
     return {"status": "created", "identity_sha256": manifest["identity_sha256"], "path": str(path.name)}
 
 
+def frozen_study_context(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Copy the bucket frozen at enrollment. Do not recompute it."""
+    extension = manifest.get("study_extension") if isinstance(manifest.get("study_extension"), dict) else None
+    if extension and extension.get("study_definition_id") == "research-study-v2":
+        return {
+            "study_definition_id": "research-study-v2",
+            "study_definition_fingerprint": extension.get("study_definition_fingerprint"),
+            "frozen_market_bucket": extension.get("bucket"),
+            "frozen_market_bucket_reason": extension.get("reason"),
+            "relative_target_id": "forward_excess_csi300_5_sessions_v1",
+            "market_bucket_rule": "close_vs_ma20_including_cutoff_and_five_session_close_return",
+            "bucket_recomputed_from_later_index": False,
+            "production_target_modified": False,
+        }
+    return {
+        "study_definition_id": manifest.get("study_definition_id") or "research-study-v1",
+        "study_definition_fingerprint": None,
+        "frozen_market_bucket": None,
+        "frozen_market_bucket_reason": None,
+        "relative_target_id": None,
+        "market_bucket_rule": None,
+        "bucket_recomputed_from_later_index": False,
+        "production_target_modified": False,
+    }
+
+
 def load_frozen_manifest(study_dir: Path, session_date: str) -> dict[str, Any]:
     path, lock = _manifest_paths(study_dir, session_date)
     if not path.is_file() or not lock.is_file():
@@ -490,6 +527,7 @@ def append_sample_link(
         "reason": None if identity["confirmed"] and in_plan else (identity.get("join_reason") or ("not_in_manifest" if identity["confirmed"] else "identity_incomplete")),
         "missing_fields": identity["missing_fields"],
         "linked_at": _now(),
+        **frozen_study_context(manifest),
     }
     path = root / "links.jsonl"
     with study_lock(root, timeout_seconds):
@@ -543,6 +581,78 @@ def _code_ref() -> dict[str, Any]:
         return {"status": "unavailable", "rev": None}
 
 
+def linkage_exclusions(links: list[dict[str, Any]]) -> dict[str, str]:
+    """Ids whose links conflict, plus every id in that symbol-day group."""
+    excluded: dict[str, str] = {}
+    grouped: dict[tuple[str, str], set[str]] = {}
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for link in links:
+        prediction_id = link.get("prediction_id")
+        if not isinstance(prediction_id, str) or not prediction_id:
+            continue
+        by_id.setdefault(prediction_id, []).append(link)
+        symbol = link.get("symbol")
+        session = link.get("session_date")
+        if isinstance(symbol, str) and symbol and isinstance(session, str) and session:
+            grouped.setdefault((symbol, session), set()).add(prediction_id)
+    for prediction_id, rows in by_id.items():
+        identities = {(row.get("fingerprint"), row.get("snapshot_ref"), row.get("symbol")) for row in rows}
+        if any(row.get("reason") == "identity_conflict" for row in rows) or len(identities) > 1:
+            excluded[prediction_id] = "identity_conflict"
+    for prediction_ids in grouped.values():
+        if len(prediction_ids) > 1:
+            for prediction_id in prediction_ids:
+                excluded.setdefault(prediction_id, "duplicate_symbol_day")
+    return excluded
+
+
+def effective_shadow_scores(scores: list[dict[str, Any]], links: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Scored rows that later conflicts have not removed from the performance view."""
+    excluded = linkage_exclusions(links)
+    for row in scores:
+        if row.get("status") == "invalidated" and isinstance(row.get("prediction_id"), str):
+            excluded.setdefault(row["prediction_id"], str(row.get("reason") or "invalidated"))
+    effective = []
+    seen: set[str] = set()
+    for row in scores:
+        prediction_id = row.get("prediction_id")
+        if row.get("status") != "scored" or not isinstance(prediction_id, str) or prediction_id in excluded or prediction_id in seen:
+            continue
+        seen.add(prediction_id)
+        effective.append(row)
+    return effective, excluded
+
+
+def _invalidation_record(prediction_id: str, reason: str, links: list[dict[str, Any]], scores: list[dict[str, Any]]) -> dict[str, Any]:
+    symbol = next((item.get("symbol") for item in links if item.get("prediction_id") == prediction_id and item.get("symbol")), None)
+    if symbol is None:
+        symbol = next((item.get("symbol") for item in scores if item.get("prediction_id") == prediction_id and item.get("symbol")), None)
+    session = next((item.get("session_date") for item in links if item.get("prediction_id") == prediction_id), None)
+    return {
+        "prediction_id": prediction_id,
+        "symbol": symbol,
+        "session_date": session,
+        "status": "invalidated",
+        "reason": reason,
+        "group": "symbol_day" if reason == "duplicate_symbol_day" else "prediction_id",
+        "invalidates_prior_scores": True,
+        "append_only": True,
+    }
+
+
+def _append_invalidations(handle: Any, links: list[dict[str, Any]], scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    excluded = linkage_exclusions(links)
+    already = {(row.get("prediction_id"), row.get("reason")) for row in scores if row.get("status") == "invalidated"}
+    written = []
+    for prediction_id, reason in sorted(excluded.items()):
+        if (prediction_id, reason) in already:
+            continue
+        record = _invalidation_record(prediction_id, reason, links, scores)
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        written.append({"prediction_id": prediction_id, "reason": reason, "symbol": record.get("symbol")})
+    return written
+
+
 def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, timeout_seconds: float = 5) -> dict[str, Any]:
     manifest = load_frozen_manifest(study_dir, session_date)
     root = _session_dir(study_dir, session_date)
@@ -553,9 +663,11 @@ def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, time
     with study_lock(root, timeout_seconds):
         if freeze_path.exists():
             freeze = _read_json(freeze_path)
-            if freeze.get("manifest_sha256") != manifest["identity_sha256"] or freeze.get("config_fingerprint") != config_fingerprint():
+            context = frozen_study_context(manifest)
+            if freeze.get("manifest_sha256") != manifest["identity_sha256"] or freeze.get("config_fingerprint") != config_fingerprint() or freeze.get("frozen_market_bucket") != context["frozen_market_bucket"]:
                 raise StudyRefusal("影子配置已冻结，不能改用另一套清单或规则指纹")
         else:
+            context = frozen_study_context(manifest)
             freeze = {
                 "schema": SCHEMA_SHADOW,
                 "session_date": session_date,
@@ -567,6 +679,7 @@ def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, time
                 "label_use": "forbidden_in_shadow_scores",
                 "promoted": False,
                 "calibrated_probability_available_for_production": False,
+                **context,
             }
             _atomic_write(freeze_path, json.dumps(freeze, ensure_ascii=False, indent=2) + "\n")
         done = {item.get("prediction_id") for item in _read_jsonl(scores_path)}
@@ -632,12 +745,31 @@ def freeze_shadow(study_dir: Path, session_date: str, predictions: Path, *, time
                     "symbol": link.get("symbol"),
                     "status": "scored",
                     "config_fingerprint": freeze["config_fingerprint"],
+                    "frozen_market_bucket": freeze.get("frozen_market_bucket"),
+                    "relative_target_id": freeze.get("relative_target_id"),
+                    "study_definition_id": freeze.get("study_definition_id"),
                     "calls": {name: evaluate_candidate(name, saved) for name in ("ensemble_baseline", "multi_factor_alone", "consensus_only")},
                 }
                 handle.write(json.dumps(score, ensure_ascii=False) + "\n")
                 done.add(prediction_id)
                 appended += 1
-    return {"status": "frozen", "appended": appended, "ambiguous": ambiguous, "config_fingerprint": freeze["config_fingerprint"], "prospective_shadow_start": freeze["prospective_shadow_start"]}
+            handle.flush()
+            invalidations = _append_invalidations(handle, links, _read_jsonl(scores_path))
+            appended += len(invalidations)
+    effective, excluded = effective_shadow_scores(_read_jsonl(scores_path), links)
+    return {
+        "status": "frozen",
+        "appended": appended,
+        "ambiguous": ambiguous,
+        "config_fingerprint": freeze["config_fingerprint"],
+        "prospective_shadow_start": freeze["prospective_shadow_start"],
+        "frozen_market_bucket": freeze.get("frozen_market_bucket"),
+        "relative_target_id": freeze.get("relative_target_id"),
+        "study_definition_id": freeze.get("study_definition_id"),
+        "effective_scored": len(effective),
+        "invalidations": [{"prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items())],
+        "field_paths": OUTPUT_FIELD_PATHS,
+    }
 
 
 def _evidence_shell(symbol: str, session_date: str) -> dict[str, Any]:
@@ -927,13 +1059,25 @@ def collect_evidence(
         "reuse_policy": REUSE_POLICY,
         "fees": fees,
         "net_pnl": {"status": "unavailable", "total_return": None},
+        **frozen_study_context(manifest),
+        "field_paths": OUTPUT_FIELD_PATHS,
     }
     _atomic_write(root / "evidence-status.json", json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+    sessions = []
+    for earlier in _session_manifests(study_dir, session_date):
+        sessions.append({
+            "session_date": earlier["session_date"],
+            "manifest_sha256": earlier["identity_sha256"],
+            "symbols": [item["symbol"] for item in earlier["membership"]],
+            **frozen_study_context(earlier),
+        })
     _atomic_write(study_dir / "enrollment-index.json", json.dumps({
         "through_date": session_date,
         "targets": targets,
         "pending_symbols": pending_left,
+        "sessions": sessions,
         "derived_from_session_sidecars": True,
+        "field_paths": OUTPUT_FIELD_PATHS,
     }, ensure_ascii=False, indent=2) + "\n")
     return status
 
@@ -948,8 +1092,9 @@ def _write_snapshot(study_dir: Path, symbol: str, snapshot: dict[str, Any]) -> N
 def daily_status(study_dir: Path, session_date: str) -> dict[str, Any]:
     manifest = load_frozen_manifest(study_dir, session_date)
     root = _session_dir(study_dir, session_date)
-    links = _read_jsonl(root / "links.jsonl")
+    links = [item for item in _read_jsonl(root / "links.jsonl") if item.get("manifest_sha256") == manifest["identity_sha256"]]
     scores = _read_jsonl(root / "shadow-scores.jsonl")
+    effective, excluded = effective_shadow_scores(scores, links)
     evidence = _read_json(root / "evidence-status.json") if (root / "evidence-status.json").exists() else None
     return {
         "schema": SCHEMA_DAILY,
@@ -960,9 +1105,13 @@ def daily_status(study_dir: Path, session_date: str) -> dict[str, Any]:
         "random_count_drawn": manifest["random_count_drawn"],
         "confirmed_links": sum(bool(item.get("confirmed")) for item in links),
         "ambiguous_links": sum(item.get("status") == "ambiguous" for item in links),
-        "shadow_scored": sum(item.get("status") == "scored" for item in scores),
+        "shadow_scored": len(effective),
         "shadow_ambiguous": sum(item.get("status") == "ambiguous" for item in scores),
+        "invalidations": [{"prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items())],
         "evidence": evidence,
+        "relative_settlements": _relative_counts(root / "relative-settlements.jsonl"),
+        "field_paths": OUTPUT_FIELD_PATHS,
+        **frozen_study_context(manifest),
         "usable_for_executable_backtest": 0,
         "probability_available": False,
         "promoted": False,
@@ -974,10 +1123,29 @@ def _blocks(rows: list[dict[str, Any]]) -> int:
     return len(_nonoverlapping_blocks(rows)["blocks"])
 
 
+def _relative_counts(path: Path) -> dict[str, int]:
+    rows = _read_jsonl(path)
+    return {
+        "rows": len(rows),
+        "settled": sum(item.get("status") == "settled" for item in rows),
+        "refused": sum(item.get("status") == "refused" for item in rows),
+    }
+
+
+def _bucket_names() -> tuple[str, ...]:
+    return ("strong", "weak", "sideways", "unavailable")
+
+
 def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = None) -> dict[str, Any]:
+    from xiao_a.research_study_extensions import bucket_evidence
+
     date.fromisoformat(review_date)
     matured = []
     sessions = []
+    missing_relative_sessions = []
+    bucket_conflicts = 0
+    invalidations: list[dict[str, Any]] = []
+    relative_rows: dict[str, list[dict[str, Any]]] = {name: [] for name in _bucket_names()}
     by_id = _read_predictions(predictions) if predictions else {}
     if study_dir.exists():
         for child in sorted(path for path in study_dir.iterdir() if path.is_dir()):
@@ -986,7 +1154,37 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
                 continue
             freeze = _read_json(freeze_path)
             sessions.append(freeze.get("session_date"))
-            for score in _read_jsonl(child / "shadow-scores.jsonl"):
+            frozen_bucket = freeze.get("frozen_market_bucket")
+            session_links = [item for item in _read_jsonl(child / "links.jsonl") if item.get("manifest_sha256") == freeze.get("manifest_sha256")]
+            session_scores = _read_jsonl(child / "shadow-scores.jsonl")
+            _effective, excluded = effective_shadow_scores(session_scores, session_links)
+            invalidations.extend({"session_date": freeze.get("session_date"), "prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items()))
+            settlement_path = child / "relative-settlements.jsonl"
+            if freeze.get("study_definition_id") == "research-study-v2" and not settlement_path.exists():
+                missing_relative_sessions.append(freeze.get("session_date"))
+            for row in _read_jsonl(settlement_path):
+                if row.get("prediction_id") in excluded:
+                    continue
+                if row.get("status") != "settled" or not isinstance(row.get("outcome"), dict) or row["outcome"].get("available") is not True:
+                    continue
+                if row.get("frozen_market_bucket") != frozen_bucket:
+                    bucket_conflicts += 1
+                    continue
+                exit_day = shanghai_day(row["outcome"].get("exit_date"))
+                if exit_day is None or exit_day >= review_date:
+                    continue
+                name = row.get("frozen_market_bucket")
+                if name not in relative_rows:
+                    bucket_conflicts += 1
+                    continue
+                relative_rows[name].append({
+                    "prediction_id": row.get("prediction_id"),
+                    "symbol": row.get("symbol"),
+                    "information_cutoff": row.get("session_date"),
+                    "as_of": row.get("session_date"),
+                    "settlement": {"exit_date": exit_day, "event_occurred": row["outcome"].get("event")},
+                })
+            for score in _effective:
                 if score.get("status") != "scored":
                     continue
                 record = by_id.get(score.get("prediction_id"))
@@ -994,10 +1192,22 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
                 exit_day = shanghai_day((settlement or {}).get("exit_date")) if isinstance(settlement, dict) else None
                 decision_day = shanghai_day((record or {}).get("as_of")) if isinstance(record, dict) else None
                 if exit_day and decision_day and decision_day >= freeze.get("prospective_shadow_start") and exit_day < review_date:
-                    matured.append({**record, "shadow": score})
+                    matured.append({**record, "shadow": score, "frozen_market_bucket": frozen_bucket})
     minimum = monitoring_block_minimum()
     blocks = _blocks(matured) if matured else 0
-    return {
+    bucket_reports = {}
+    for name in _bucket_names():
+        evidence = bucket_evidence(relative_rows[name])
+        events = [row["settlement"]["event_occurred"] for row in relative_rows[name] if isinstance(row["settlement"]["event_occurred"], bool)]
+        bucket_reports[name] = {
+            "frozen_market_bucket": name,
+            "eligible_relative_rows": len(relative_rows[name]),
+            "evidence": evidence,
+            "relative_hit_rate": None if evidence["insufficient_evidence"] or name == "unavailable" or not events else sum(events) / len(events),
+            "claim_allowed": False,
+            "direction_hit_rate": None,
+        }
+    report = {
         "schema": SCHEMA_WEEKLY,
         "review_date": review_date,
         "sessions": sessions,
@@ -1008,8 +1218,137 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
         "probability_available": False,
         "promoted": False,
         "selected_candidate": None,
+        "bucket_reports": bucket_reports,
+        "missing_relative_sessions": missing_relative_sessions,
+        "bucket_conflicts": bucket_conflicts,
+        "invalidations": invalidations,
+        "production_target_modified": False,
+        "field_paths": OUTPUT_FIELD_PATHS,
         "hypotheses": [OFFLINE_HYPOTHESIS],
-        "note": "成熟标签少于生产监测门槛时不报告方向命中率。影子分数文件本身不含未来标签。",
+        "note": "每个市场状态单独计算24个非重叠块。相对标签缺失时不补超额收益。影子分数文件本身不含未来标签。",
+    }
+    if study_dir.exists():
+        folder = study_dir / "weekly-reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        _atomic_write(folder / f"{review_date}.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    return report
+
+
+def settle_relative_labels(study_dir: Path, session_date: str, labels: list[dict[str, Any]], *, timeout_seconds: float = 5) -> dict[str, Any]:
+    """Append relative settlements for one frozen session. Missing evidence is a refusal row."""
+    from xiao_a.research_study_extensions import bucket_evidence, relative_outcome
+
+    manifest = load_frozen_manifest(study_dir, session_date)
+    context = frozen_study_context(manifest)
+    if context["study_definition_id"] != "research-study-v2":
+        raise StudyRefusal("相对沪深300结算只接受已冻结的 research-study-v2 清单")
+    root = _session_dir(study_dir, session_date)
+    session_links = [item for item in _read_jsonl(root / "links.jsonl") if item.get("manifest_sha256") == manifest["identity_sha256"]]
+    excluded = linkage_exclusions(session_links)
+    confirmed = {
+        item.get("prediction_id"): item
+        for item in session_links
+        if item.get("confirmed")
+    }
+    planned = {item["symbol"] for item in manifest["membership"]}
+    path = root / "relative-settlements.jsonl"
+    appended = 0
+    unchanged = 0
+    refused = 0
+    with study_lock(root, timeout_seconds):
+        existing = _read_jsonl(path)
+        by_id = {item.get("prediction_id"): item for item in existing if item.get("prediction_id")}
+        with path.open("a", encoding="utf-8") as handle:
+            for label in labels:
+                if not isinstance(label, dict):
+                    refused += 1
+                    continue
+                prediction_id = label.get("prediction_id")
+                try:
+                    symbol = _canonical_symbol(str(label.get("symbol"))) if label.get("symbol") else None
+                except ValueError:
+                    symbol = None
+                decision_day = shanghai_day(label.get("information_cutoff")) or shanghai_day(label.get("as_of"))
+                outcome = relative_outcome(label.get("stock") or {}, label.get("index") or {})
+                reason = None
+                status = "settled"
+                if prediction_id in excluded:
+                    status, reason = "refused", excluded[prediction_id]
+                    outcome = {**outcome, "available": False, "event": None, "excess_return": None}
+                elif context["frozen_market_bucket"] in {None, "unavailable"}:
+                    status, reason = "refused", "frozen_bucket_unavailable"
+                elif prediction_id not in confirmed:
+                    status, reason = "refused", "not_in_confirmed_links"
+                elif symbol not in planned or confirmed[prediction_id].get("symbol") != symbol:
+                    status, reason = "refused", "not_in_manifest"
+                elif decision_day != session_date:
+                    status, reason = "refused", "session_date_mismatch"
+                elif outcome["available"] is not True:
+                    status, reason = "refused", outcome.get("reason") or "relative_evidence_missing"
+                record = {
+                    "schema": SCHEMA_RELATIVE,
+                    "session_date": session_date,
+                    "manifest_sha256": manifest["identity_sha256"],
+                    "prediction_id": prediction_id,
+                    "symbol": symbol,
+                    "status": status,
+                    "reason": reason,
+                    "outcome": outcome,
+                    **context,
+                }
+                identity = _sha256_json({key: record[key] for key in ("prediction_id", "symbol", "status", "reason", "outcome", "frozen_market_bucket")})
+                record["settlement_sha256"] = identity
+                prior = by_id.get(prediction_id)
+                if prior and prediction_id in excluded:
+                    unchanged += 1
+                    continue
+                if prior and prior.get("settlement_sha256") == identity:
+                    unchanged += 1
+                    continue
+                if prior and prior.get("settlement_sha256") != identity:
+                    record["status"] = "refused"
+                    record["reason"] = "settlement_conflict"
+                    record["outcome"] = {**outcome, "available": False, "event": None, "excess_return": None}
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                by_id[prediction_id] = record
+                appended += 1
+                if record["status"] != "settled":
+                    refused += 1
+    settled_rows = []
+    for item in _read_jsonl(path):
+        if item.get("prediction_id") in excluded:
+            continue
+        if item.get("status") == "settled" and isinstance(item.get("outcome"), dict) and item["outcome"].get("available") is True:
+            settled_rows.append({
+                "prediction_id": item.get("prediction_id"),
+                "symbol": item.get("symbol"),
+                "information_cutoff": session_date,
+                "as_of": session_date,
+                "settlement": {"exit_date": item["outcome"].get("exit_date"), "event_occurred": item["outcome"].get("event")},
+            })
+    evidence = bucket_evidence(settled_rows)
+    events = [row["settlement"]["event_occurred"] for row in settled_rows if isinstance(row["settlement"]["event_occurred"], bool)]
+    hit_rate = None
+    if context["frozen_market_bucket"] in {"strong", "weak", "sideways"} and not evidence["insufficient_evidence"] and events:
+        hit_rate = sum(events) / len(events)
+    return {
+        "schema": SCHEMA_RELATIVE,
+        "session_date": session_date,
+        "manifest_sha256": manifest["identity_sha256"],
+        "frozen_market_bucket": context["frozen_market_bucket"],
+        "relative_target_id": context["relative_target_id"],
+        "production_target_modified": False,
+        "bucket_recomputed_from_later_index": False,
+        "rows_appended": appended,
+        "rows_unchanged": unchanged,
+        "rows_refused": refused,
+        "eligible_relative_rows": len(settled_rows),
+        "invalidations": [{"prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items())],
+        "evidence": evidence,
+        "relative_hit_rate": hit_rate,
+        "claim_allowed": False,
+        "sidecar": "relative-settlements.jsonl",
+        "field_paths": OUTPUT_FIELD_PATHS,
     }
 
 
@@ -1084,17 +1423,12 @@ def run_daily_command(args: Any) -> int:
         elif command == "weekly-review":
             result = weekly_review(args.study_dir, args.review_date, args.predictions)
         elif command == "relative-study":
-            from xiao_a.research_study_extensions import report_frozen_relative
-            manifest = load_frozen_manifest(args.study_dir, args.session_date)
             labels = _read_json(args.labels)
             if isinstance(labels, dict):
                 labels = labels.get("labels")
             if not isinstance(labels, list):
                 raise StudyRefusal("相对标签文件必须是数组")
-            try:
-                result = report_frozen_relative(manifest, labels)
-            except ValueError as exc:
-                raise StudyRefusal(str(exc)) from exc
+            result = settle_relative_labels(args.study_dir, args.session_date, labels, timeout_seconds=getattr(args, "lock_timeout_seconds", 5))
         elif command == "retrospective-market-bucket":
             from xiao_a.research_study_extensions import classify_market_bucket
             result = classify_market_bucket(_read_json(args.index_history), args.cutoff)
