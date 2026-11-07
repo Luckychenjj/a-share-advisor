@@ -125,6 +125,88 @@ def classify_market_bucket(payload: dict[str, Any], cutoff: str) -> dict[str, An
     return {**base, "bucket": bucket, "reason": "frozen_rule", "close": close, "ma20": ma20, "five_session_close_return": five}
 
 
+def _unavailable_bucket(reason: str, *, source_valid: bool) -> dict[str, Any]:
+    return {
+        "study_definition_id": STUDY_DEFINITION_ID,
+        "study_definition_fingerprint": study_definition_fingerprint(),
+        "symbol": CSI300_INDEX,
+        "bucket": "unavailable",
+        "reason": reason,
+        "source_valid": source_valid,
+        "provenance_verified": False,
+        "verified_price_index": False,
+        "etf_substitute": False,
+        "close": None,
+        "ma20": None,
+        "five_session_close_return": None,
+        "retrospective": False,
+        "not_a_v1_fallback": True,
+    }
+
+
+def _malformed_index_reason(payload: dict[str, Any], cutoff: str) -> str | None:
+    bars = payload.get("bars")
+    if bars is None:
+        return None
+    if not isinstance(bars, list):
+        return "index_bar_invalid"
+    seen: set[str] = set()
+    for bar in bars:
+        if not isinstance(bar, dict):
+            return "index_bar_invalid"
+        day = shanghai_day(bar.get("trading_date"))
+        close = _safe_float(bar.get("close"))
+        if day is None or close is None or close <= 0:
+            return "index_bar_invalid"
+        if day in seen:
+            return "index_duplicate_date"
+        seen.add(day)
+        if day > cutoff:
+            return "index_history_contains_bars_after_cutoff"
+    return None
+
+
+def enroll_market_bucket(payload: dict[str, Any] | None, cutoff: str) -> dict[str, Any]:
+    """Freeze v2 even when the index is missing. Malformed bars still fail."""
+    cutoff = date.fromisoformat(cutoff).isoformat()
+    if payload is None:
+        return _unavailable_bucket("index_history_missing", source_valid=False)
+    if not isinstance(payload, dict):
+        raise ValueError("malformed_index_history")
+    malformed = _malformed_index_reason(payload, cutoff)
+    if malformed:
+        raise ValueError(malformed)
+    try:
+        classified = classify_market_bucket(payload, cutoff)
+    except ValueError as exc:
+        return _unavailable_bucket(str(exc), source_valid=False)
+    source_valid = classified.get("bucket") != "unavailable" or classified.get("reason") == "index_history_shorter_than_20_sessions"
+    return {**classified, "source_valid": source_valid, "provenance_verified": True, "not_a_v1_fallback": True}
+
+
+def public_index_observation(fetched: dict[str, Any] | None, *, error: str | None = None) -> dict[str, Any]:
+    """Keep a public CSI300 read. Do not call it a verified price index or an ETF."""
+    if error or not isinstance(fetched, dict):
+        return {"payload": None, "reason": "index_fetch_failed", "error": error, "provenance_verified": False, "etf_substitute": False}
+    symbol = str(fetched.get("symbol") or CSI300_INDEX)
+    if symbol in ETF_PROXIES:
+        raise ValueError("etf_proxy_refused")
+    payload = {
+        "symbol": CSI300_INDEX,
+        "instrument": "public_kline",
+        "price_basis": fetched.get("price_basis") if isinstance(fetched.get("price_basis"), str) and fetched.get("price_basis") else "unverified",
+        "provenance_verified": False,
+        "certified_price_index": False,
+        "source": fetched.get("source"),
+        "source_url": fetched.get("source_url"),
+        "fetched_at": fetched.get("fetched_at"),
+        "as_of": fetched.get("as_of"),
+        "bars": fetched.get("bars") if isinstance(fetched.get("bars"), list) else [],
+        "etf_substitute": False,
+    }
+    return {"payload": payload, "reason": "public_adapter_not_certified_price_index", "provenance_verified": False, "etf_substitute": False}
+
+
 def assert_prospective_session(session_date: str, today: str) -> None:
     if date.fromisoformat(session_date) < date.fromisoformat(today):
         raise ValueError("past_session_cannot_become_prospective_study")

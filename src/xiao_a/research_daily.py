@@ -34,14 +34,15 @@ SCHEMA_DAILY = "xiao_a_daily_status_v1"
 SCHEMA_WEEKLY = "xiao_a_weekly_review_v1"
 SCHEMA_RELATIVE = "xiao_a_relative_settlement_v1"
 OUTPUT_FIELD_PATHS = {
-    "enrollment_bucket": "sessions/<date>/manifest.json -> study_extension.bucket",
-    "enrollment_index_bucket": "enrollment-index.json -> sessions[].frozen_market_bucket",
-    "shadow_bucket": "sessions/<date>/shadow-freeze.json -> frozen_market_bucket",
-    "shadow_score_bucket": "sessions/<date>/shadow-scores.jsonl -> frozen_market_bucket",
-    "relative_outcome": "sessions/<date>/relative-settlements.jsonl -> outcome.excess_return",
-    "relative_refusal": "sessions/<date>/relative-settlements.jsonl -> status, reason",
-    "weekly_bucket_gate": "weekly-reviews/<review-date>.json -> bucket_reports.<bucket>.evidence.minimum_monitoring_blocks",
-    "evidence_bars": "evidence-snapshots/<SYMBOL>/<stamp>.json -> series[].bars",
+    "enrollment_bucket": "<study>/<date>/manifest.json -> study_extension.bucket",
+    "enrollment_index_bucket": "<study>/enrollment-index.json -> sessions[].frozen_market_bucket",
+    "shadow_bucket": "<study>/<date>/shadow-freeze.json -> frozen_market_bucket",
+    "shadow_score_bucket": "<study>/<date>/shadow-scores.jsonl -> frozen_market_bucket",
+    "relative_outcome": "<study>/<date>/relative-settlements.jsonl -> outcome.excess_return",
+    "relative_refusal": "<study>/<date>/relative-status.json -> reason",
+    "weekly_bucket_gate": "<study>/weekly-reviews/<review-date>.json -> bucket_reports.<bucket>.evidence.minimum_monitoring_blocks",
+    "evidence_bars": "<study>/evidence-snapshots/<SYMBOL>/<stamp>.json -> series[].bars",
+    "index_snapshot": "<study>/index-snapshots/SH_000300/<stamp>.json -> price_basis, provenance_verified",
 }
 OFFLINE_HYPOTHESIS = {
     "id": "single-factor-offline-v1",
@@ -1110,6 +1111,7 @@ def daily_status(study_dir: Path, session_date: str) -> dict[str, Any]:
         "invalidations": [{"prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items())],
         "evidence": evidence,
         "relative_settlements": _relative_counts(root / "relative-settlements.jsonl"),
+        "relative_label_reason": (_read_json(root / "relative-status.json").get("label_reason") if (root / "relative-status.json").exists() else None),
         "field_paths": OUTPUT_FIELD_PATHS,
         **frozen_study_context(manifest),
         "usable_for_executable_backtest": 0,
@@ -1145,6 +1147,7 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
     missing_relative_sessions = []
     bucket_conflicts = 0
     invalidations: list[dict[str, Any]] = []
+    relative_label_reasons: list[dict[str, Any]] = []
     relative_rows: dict[str, list[dict[str, Any]]] = {name: [] for name in _bucket_names()}
     by_id = _read_predictions(predictions) if predictions else {}
     if study_dir.exists():
@@ -1160,7 +1163,13 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
             _effective, excluded = effective_shadow_scores(session_scores, session_links)
             invalidations.extend({"session_date": freeze.get("session_date"), "prediction_id": prediction_id, "reason": reason} for prediction_id, reason in sorted(excluded.items()))
             settlement_path = child / "relative-settlements.jsonl"
-            if freeze.get("study_definition_id") == "research-study-v2" and not settlement_path.exists():
+            status_path = child / "relative-status.json"
+            if status_path.exists():
+                relative_label_reasons.append({
+                    "session_date": freeze.get("session_date"),
+                    "reason": _read_json(status_path).get("label_reason"),
+                })
+            elif freeze.get("study_definition_id") == "research-study-v2" and not settlement_path.exists():
                 missing_relative_sessions.append(freeze.get("session_date"))
             for row in _read_jsonl(settlement_path):
                 if row.get("prediction_id") in excluded:
@@ -1222,6 +1231,7 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
         "missing_relative_sessions": missing_relative_sessions,
         "bucket_conflicts": bucket_conflicts,
         "invalidations": invalidations,
+        "relative_label_reasons": relative_label_reasons,
         "production_target_modified": False,
         "field_paths": OUTPUT_FIELD_PATHS,
         "hypotheses": [OFFLINE_HYPOTHESIS],
@@ -1234,7 +1244,14 @@ def weekly_review(study_dir: Path, review_date: str, predictions: Path | None = 
     return report
 
 
-def settle_relative_labels(study_dir: Path, session_date: str, labels: list[dict[str, Any]], *, timeout_seconds: float = 5) -> dict[str, Any]:
+def settle_relative_labels(
+    study_dir: Path,
+    session_date: str,
+    labels: list[dict[str, Any]],
+    *,
+    timeout_seconds: float = 5,
+    labels_supplied: bool = True,
+) -> dict[str, Any]:
     """Append relative settlements for one frozen session. Missing evidence is a refusal row."""
     from xiao_a.research_study_extensions import bucket_evidence, relative_outcome
 
@@ -1331,7 +1348,7 @@ def settle_relative_labels(study_dir: Path, session_date: str, labels: list[dict
     hit_rate = None
     if context["frozen_market_bucket"] in {"strong", "weak", "sideways"} and not evidence["insufficient_evidence"] and events:
         hit_rate = sum(events) / len(events)
-    return {
+    result = {
         "schema": SCHEMA_RELATIVE,
         "session_date": session_date,
         "manifest_sha256": manifest["identity_sha256"],
@@ -1348,8 +1365,16 @@ def settle_relative_labels(study_dir: Path, session_date: str, labels: list[dict
         "relative_hit_rate": hit_rate,
         "claim_allowed": False,
         "sidecar": "relative-settlements.jsonl",
+        "label_reason": (
+            "relative_labels_not_supplied" if not labels_supplied
+            else "relative_labels_empty" if not labels
+            else "frozen_bucket_unavailable" if context["frozen_market_bucket"] in {None, "unavailable"}
+            else None
+        ),
         "field_paths": OUTPUT_FIELD_PATHS,
     }
+    _atomic_write(root / "relative-status.json", json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    return result
 
 
 def _resolve_study_dir(args: Any) -> Path:
@@ -1369,18 +1394,40 @@ def run_daily_command(args: Any) -> int:
             args.study_dir = _resolve_study_dir(args)
         if command == "sample-manifest":
             from datetime import datetime
-            from xiao_a.research_study_extensions import assert_prospective_session, classify_market_bucket
+            from xiao_a.research_study_extensions import assert_prospective_session
             pool, rejected = _read_symbol_lines(args.pool)
             universe = _load_universe(args.universe)
             holdings = _holding_symbols(args.holdings)
             extension = None
             definition = getattr(args, "study_definition", "research-study-v1")
             if definition == "research-study-v2":
-                if args.index_history is None:
-                    raise StudyRefusal("research-study-v2 需要沪深300价格指数快照")
+                from xiao_a.research_study_extensions import enroll_market_bucket, public_index_observation
                 try:
                     assert_prospective_session(args.session_date, datetime.now(_SHANGHAI).date().isoformat())
-                    extension = classify_market_bucket(_read_json(args.index_history), args.session_date)
+                except ValueError as exc:
+                    raise StudyRefusal(str(exc)) from exc
+                payload = None
+                if getattr(args, "collect_index", False) and args.index_history is None:
+                    try:
+                        fetched = bounded_fetch(_public_index_fetch, "SH.000300", "none", 30)
+                    except Exception as exc:
+                        fetched = {"error": f"{type(exc).__name__}: {exc}"}
+                    if fetched.get("timed_out") or (fetched.get("error") and not fetched.get("bars")):
+                        observation = public_index_observation(None, error=fetched.get("error") or "budget_exhausted")
+                    else:
+                        observation = public_index_observation(fetched)
+                    _write_index_observation(args.study_dir, observation)
+                    payload = observation.get("payload")
+                elif args.index_history is not None:
+                    if not args.index_history.is_file():
+                        payload = None
+                    else:
+                        try:
+                            payload = _read_json(args.index_history)
+                        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                            raise StudyRefusal("malformed_index_history") from exc
+                try:
+                    extension = enroll_market_bucket(payload, args.session_date)
                 except ValueError as exc:
                     raise StudyRefusal(str(exc)) from exc
             elif args.index_history is not None:
@@ -1423,12 +1470,27 @@ def run_daily_command(args: Any) -> int:
         elif command == "weekly-review":
             result = weekly_review(args.study_dir, args.review_date, args.predictions)
         elif command == "relative-study":
-            labels = _read_json(args.labels)
-            if isinstance(labels, dict):
-                labels = labels.get("labels")
-            if not isinstance(labels, list):
-                raise StudyRefusal("相对标签文件必须是数组")
-            result = settle_relative_labels(args.study_dir, args.session_date, labels, timeout_seconds=getattr(args, "lock_timeout_seconds", 5))
+            labels_path = getattr(args, "labels", None)
+            if labels_path is None or not Path(labels_path).is_file():
+                result = settle_relative_labels(
+                    args.study_dir, args.session_date, [],
+                    timeout_seconds=getattr(args, "lock_timeout_seconds", 5),
+                    labels_supplied=False,
+                )
+            else:
+                try:
+                    labels = _read_json(labels_path)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise StudyRefusal("malformed_relative_labels") from exc
+                if isinstance(labels, dict):
+                    labels = labels.get("labels")
+                if not isinstance(labels, list):
+                    raise StudyRefusal("相对标签文件必须是数组")
+                result = settle_relative_labels(
+                    args.study_dir, args.session_date, labels,
+                    timeout_seconds=getattr(args, "lock_timeout_seconds", 5),
+                    labels_supplied=True,
+                )
         elif command == "retrospective-market-bucket":
             from xiao_a.research_study_extensions import classify_market_bucket
             result = classify_market_bucket(_read_json(args.index_history), args.cutoff)
@@ -1441,6 +1503,37 @@ def run_daily_command(args: Any) -> int:
     except StudyRefusal as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=__import__("sys").stderr)
         return 2
+
+
+def _write_index_observation(study_dir: Path, observation: dict[str, Any]) -> None:
+    folder = study_dir / "index-snapshots" / "SH_000300"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(_SHANGHAI).strftime("%Y%m%dT%H%M%S%f")
+    _atomic_write(folder / f"{stamp}.json", json.dumps(observation, ensure_ascii=False, indent=2) + "\n")
+
+
+def _public_index_fetch(symbol: str, adjustment: str) -> dict[str, Any]:
+    """One short public read of SH.000300. The result is not a certified price index."""
+    if symbol != "SH.000300":
+        return {"status": "unavailable", "error": "etf_proxy_refused", "symbol": symbol}
+    from xiao_a.data.kline import EastmoneyKlineProvider, KlineRouter, TencentKlineProvider
+
+    router = KlineRouter([TencentKlineProvider(priority=10), EastmoneyKlineProvider(priority=20)])
+    result = router.fetch_daily(symbol, limit=30, adjustment="none")
+    provenance = result.provenance
+    last = result.bars[-1].trading_date.isoformat() if result.bars else None
+    return {
+        "status": result.status.value,
+        "symbol": "SH.000300",
+        "source": provenance.source if provenance else None,
+        "source_url": provenance.source_url if provenance else None,
+        "fetched_at": provenance.fetched_at.isoformat() if provenance and provenance.fetched_at else None,
+        "as_of": last,
+        "price_basis": None,
+        "provenance_verified": False,
+        "bars": [{"trading_date": bar.trading_date.isoformat(), "open": bar.open, "close": bar.close} for bar in result.bars],
+        "error": "; ".join(result.errors) or None,
+    }
 
 
 def _public_fetcher():

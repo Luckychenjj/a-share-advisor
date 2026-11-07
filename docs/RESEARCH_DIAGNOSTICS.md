@@ -161,7 +161,7 @@ PYTHONPATH=src python -m xiao_a.cli research weekly-review \
 
 这两项只属于 `research-study-v2`。已有的 v1 清单不会被改写。过去的交易日也不能补成前瞻研究。规则在抽样前固定：沪深300收盘高于包含当日的20日简单均线，并且5日收盘收益大于0，为强；两者都严格小于为弱；其余已核实的情况为震荡，相等算震荡。指数历史不足、来源未核实，或快照里有截止日之后的K线，就拒绝或记为不可用，不会当成震荡，也不从 `market_regime` 分数推断。
 
-抽样时冻结的状态写入清单 `study_extension.bucket`。影子冻结读取这个字段，写到 `shadow-freeze.json` 的 `frozen_market_bucket`，并抄到每条 `shadow-scores.jsonl`。证据状态和 `enrollment-index.json` 的 `sessions[]` 也带同一字段。这些侧车不重新读取后来的指数文件。
+抽样时冻结的状态写入 `<study>/<date>/manifest.json` 的 `study_extension.bucket`。影子冻结读取这个字段，写到 `<study>/<date>/shadow-freeze.json` 的 `frozen_market_bucket`，并抄到每条 `shadow-scores.jsonl`。`<study>/enrollment-index.json` 的 `sessions[]` 也带同一字段。这些侧车不重新读取后来的指数文件。指数缺失或来源未核实仍冻结为 `unavailable` 并继续抽样，不会退回 v1，也不会在事后把已冻结的不可用改成强、弱或震荡。K线损坏、重复日期，或含有截止日之后的柱，退出码 2。已经冻结的清单如果和这次内容冲突，同样退出码 2。
 
 相对结算读取已冻结清单和已确认链接，把结果追加到 `relative-settlements.jsonl`。生产目标不变。缺公司行为核实、缺同步端点、预测不在确认链接里，或冻结状态是 `unavailable`，该行 `status` 为 `refused`，`outcome.excess_return` 不作为可用结果。同一预测 ID 的结算内容变了，记为 `settlement_conflict`，不覆盖原行。未满 24 个非重叠块时 `relative_hit_rate` 为 null。
 
@@ -178,13 +178,15 @@ PYTHONPATH=src python -m xiao_a.cli research relative-study \
 
 | 路径 | 含义 |
 | --- | --- |
-| `sessions/<date>/manifest.json` → `study_extension.bucket` | 抽样时冻结的强、弱、震荡或不可用 |
-| `enrollment-index.json` → `sessions[].frozen_market_bucket` | 跨日登记里的同一状态 |
-| `sessions/<date>/shadow-freeze.json` → `frozen_market_bucket` | 影子配置抄录的状态 |
-| `sessions/<date>/shadow-scores.jsonl` → `frozen_market_bucket` | 每条影子分数上的状态，不含未来标签 |
-| `sessions/<date>/relative-settlements.jsonl` → `outcome.excess_return` | 已核实的相对收益；拒绝行看 `status` 和 `reason` |
-| `weekly-reviews/<review-date>.json` → `bucket_reports.<bucket>.evidence.minimum_monitoring_blocks` | 该状态自己的 24 块门槛 |
-| `evidence-snapshots/<SYMBOL>/<stamp>.json` → `series[].bars` | 已保存的 OHLC，不证明可执行回测 |
+| `<study>/<date>/manifest.json` → `study_extension.bucket` | 抽样时冻结的强、弱、震荡或不可用 |
+| `<study>/enrollment-index.json` → `sessions[].frozen_market_bucket` | 跨日登记里的同一状态 |
+| `<study>/<date>/shadow-freeze.json` → `frozen_market_bucket` | 影子配置抄录的状态 |
+| `<study>/<date>/shadow-scores.jsonl` → `frozen_market_bucket` | 每条影子分数上的状态，不含未来标签 |
+| `<study>/<date>/relative-settlements.jsonl` → `outcome.excess_return` | 已核实的相对收益 |
+| `<study>/<date>/relative-status.json` → `label_reason` | 标签缺失、为空，或冻结状态不可用 |
+| `<study>/weekly-reviews/<review-date>.json` → `bucket_reports.<bucket>.evidence.minimum_monitoring_blocks` | 该状态自己的 24 块门槛 |
+| `<study>/evidence-snapshots/<SYMBOL>/<stamp>.json` → `series[].bars` | 已保存的 OHLC，不证明可执行回测 |
+| `<study>/index-snapshots/SH_000300/<stamp>.json` → `provenance_verified` | 可选公开日线；没有证明时为 false |
 
 ```bash
 PYTHONPATH=src python -m xiao_a.cli research weekly-review \
@@ -205,7 +207,37 @@ PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
   --index-history ./csi300-price-index.json
 ```
 
-指数快照如果来源不完整，命令以退出码 2 拒绝，不会生成清单。回顾性状态只打印，不写回清单：
+没有核实过的价格指数、公司行为或相对标签时，抽样、影子、日状态和周回顾仍可运行。`--collect-index` 只请求一次 `SH.000300` 的公开日线，保存来源、时间和价格口径，`provenance_verified` 保持 false，不用 ETF 代替。可执行净损益缺少证据时记为不可用，不因此停掉抽样。
+
+一条实际顺序。评估沿用已经保存的自动评估响应，不在这里重新调用生产评估。证据预算 240 秒，外层 `timeout 300` 把这一步限在 5 分钟内。其余命令只读写研究目录。
+
+```bash
+STUDY=/workspace/xiao-a-research/demo
+DAY=2026-11-07
+PYTHONPATH=src python -m xiao_a.cli research sample-manifest \
+  --study-dir "$STUDY" --session-date "$DAY" \
+  --pool ./pool.txt --universe ./a-share-snapshot.json \
+  --study-definition research-study-v2
+PYTHONPATH=src python -m xiao_a.cli research sample-link \
+  --study-dir "$STUDY" --session-date "$DAY" \
+  --response ./one-eval.json --audit "$XIAO_A_AUDIT_FILE"
+PYTHONPATH=src python -m xiao_a.cli research shadow-freeze \
+  --study-dir "$STUDY" --session-date "$DAY" --predictions ./saved-predictions.jsonl
+timeout 300 python -m xiao_a.cli research collect-evidence \
+  --study-dir "$STUDY" --session-date "$DAY" --budget-seconds 240
+PYTHONPATH=src python -m xiao_a.cli research relative-study \
+  --study-dir "$STUDY" --session-date "$DAY"
+PYTHONPATH=src python -m xiao_a.cli research daily-status \
+  --study-dir "$STUDY" --session-date "$DAY"
+PYTHONPATH=src python -m xiao_a.cli research weekly-review \
+  --study-dir "$STUDY" --review-date "$DAY" --predictions ./saved-predictions.jsonl
+```
+
+没有 `--index-history` 时，`<study>/<date>/manifest.json` 的 `study_extension.bucket` 是 `unavailable`，`reason` 是 `index_history_missing`，`source_valid` 是 false。链接成功时 `sample-link` 为 `confirmed`。没有 `--labels` 时 `<study>/<date>/relative-status.json` 的 `label_reason` 是 `relative_labels_not_supplied`，`relative_hit_rate` 为 null。`daily-status` 的 `usable_for_executable_backtest` 为 0。周回顾里 `bucket_reports.unavailable.evidence.minimum_monitoring_blocks` 为 24，`relative_hit_rate` 为 null。
+
+将来若要结算相对收益，标签文件需要 `prediction_id`、`symbol`、`information_cutoff`，以及股票端 `corporate_actions_verified=true`、`price_basis` 为 `qfq` 或 `comparable_total_return`、`source`、`fetched_at`、同步的 `entry_date`、`entry_open`、`exit_date`、`exit_close`。指数端必须是 `SH.000300`、`price_basis=price_index`、`provenance_verified=true` 和同一组日期价格。现在没有官方复权因子、历史 ST、交易所涨跌停和已核实公司行为，所以这些字段不能由公开日线自动填成真。缺任何一项时该行 `status` 为 `refused`，并写明 `reason`。
+
+回顾性状态只打印，不写回清单：
 
 ```bash
 PYTHONPATH=src python -m xiao_a.cli research retrospective-market-bucket \

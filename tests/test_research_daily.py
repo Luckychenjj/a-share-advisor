@@ -548,6 +548,108 @@ class DailyStudyTests(unittest.TestCase):
             self.assertEqual(after["rows_appended"], 0)
             self.assertEqual(settle_relative_labels(relative, "2026-11-07", [label])["rows_appended"], 0)
 
+    def test_missing_index_and_labels_keep_v2_day_moving(self):
+        from datetime import datetime
+        from xiao_a.cli import main
+        from xiao_a.prediction_audit import _canonical
+        from xiao_a.research_daily import _SHANGHAI
+        from xiao_a.research_study_extensions import enroll_market_bucket, public_index_observation
+        import hashlib
+        today = datetime.now(_SHANGHAI).date().isoformat()
+        with self._tmp() as root:
+            study = root / "study"
+            pool = root / "pool.txt"
+            universe = root / "universe.json"
+            pool.write_text("SH.600000\n", encoding="utf-8")
+            universe.write_text(json.dumps({
+                "as_of": today, "fetched_at": None, "source": "bare_list",
+                "securities": [{"symbol": "SH.600000", "name": "示例", "is_st": False, "delisted": False, "suspended": False, "last_price": 10, "volume": 1}],
+            }), encoding="utf-8")
+            end = date.fromisoformat(today)
+            bars = [{"trading_date": (end - timedelta(days=19 - index)).isoformat(), "close": 100 if index < 19 else 110, "open": 100} for index in range(20)]
+            tampered = root / "tampered.json"
+            tampered.write_text(json.dumps({
+                "symbol": "SH.000300", "instrument": "price_index", "price_basis": "price_index",
+                "provenance_verified": False, "source": "local", "source_url": "https://example.test/csi300",
+                "fetched_at": today + "T15:00:00+08:00", "as_of": today,
+                "bars": bars + [{"trading_date": (end + timedelta(days=1)).isoformat(), "close": 1, "open": 1}],
+            }), encoding="utf-8")
+            self.assertEqual(main(["research", "sample-manifest", "--study-dir", str(study), "--session-date", today, "--pool", str(pool), "--universe", str(universe), "--study-definition", "research-study-v2", "--index-history", str(tampered), "--random-count", "0"]), 2)
+            self.assertFalse((study / today / "manifest.json").exists())
+            self.assertEqual(main(["research", "sample-manifest", "--study-dir", str(study), "--session-date", today, "--pool", str(pool), "--universe", str(universe), "--study-definition", "research-study-v2", "--random-count", "0"]), 0)
+            manifest = json.loads((study / today / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["study_extension"]["study_definition_id"], "research-study-v2")
+            self.assertEqual(manifest["study_extension"]["bucket"], "unavailable")
+            self.assertEqual(manifest["study_extension"]["reason"], "index_history_missing")
+            self.assertFalse(manifest["study_extension"]["source_valid"])
+            self.assertTrue(manifest["study_extension"]["not_a_v1_fallback"])
+            snapshot = {"features": {"trend": 1}}
+            digest = hashlib.sha256(_canonical(snapshot)).hexdigest()
+            audit = root / "audit.jsonl"
+            audit.write_text(json.dumps({
+                "event_type": "prediction_created", "prediction_id": "SYN-1", "fingerprint": "fp",
+                "symbol": "SH.600000", "as_of": today + "T15:00:00+08:00",
+                "input_snapshot": snapshot, "input_sha256": digest,
+            }) + "\n", encoding="utf-8")
+            before = audit.read_bytes()
+            response = root / "response.json"
+            response.write_text(json.dumps({"symbol": "SH.600000", "prediction_audit": {"prediction_id": "SYN-1"}}), encoding="utf-8")
+            self.assertEqual(main(["research", "sample-link", "--study-dir", str(study), "--session-date", today, "--response", str(response), "--audit", str(audit)]), 0)
+            self.assertEqual(audit.read_bytes(), before)
+            predictions = root / "predictions.jsonl"
+            predictions.write_text(json.dumps({
+                "prediction_id": "SYN-1", "fingerprint": "fp", "symbol": "SH.600000",
+                "as_of": today + "T15:00:00+08:00", "input_snapshot": snapshot, "input_sha256": digest,
+                "rule_score": 0.4, "submodel_scores": {"multi_factor": 0.4},
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(main(["research", "shadow-freeze", "--study-dir", str(study), "--session-date", today, "--predictions", str(predictions)]), 0)
+            freeze = json.loads((study / today / "shadow-freeze.json").read_text(encoding="utf-8"))
+            self.assertEqual(freeze["frozen_market_bucket"], "unavailable")
+            self.assertEqual(freeze["study_definition_id"], "research-study-v2")
+            self.assertEqual(main(["research", "collect-evidence", "--study-dir", str(study), "--session-date", today, "--budget-seconds", "5"]), 0)
+            self.assertEqual(main(["research", "relative-study", "--study-dir", str(study), "--session-date", today]), 0)
+            status = json.loads((study / today / "relative-status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["label_reason"], "relative_labels_not_supplied")
+            self.assertIsNone(status["relative_hit_rate"])
+            self.assertEqual(status["frozen_market_bucket"], "unavailable")
+            self.assertEqual(main(["research", "daily-status", "--study-dir", str(study), "--session-date", today]), 0)
+            self.assertEqual(main(["research", "weekly-review", "--study-dir", str(study), "--review-date", today, "--predictions", str(predictions)]), 0)
+            weekly = json.loads((study / "weekly-reviews" / f"{today}.json").read_text(encoding="utf-8"))
+            self.assertEqual(weekly["bucket_reports"]["unavailable"]["evidence"]["minimum_monitoring_blocks"], 24)
+            self.assertIsNone(weekly["bucket_reports"]["unavailable"]["relative_hit_rate"])
+            self.assertEqual(weekly["relative_label_reasons"][0]["reason"], "relative_labels_not_supplied")
+            self.assertEqual(weekly["matured_rows"], 0)
+            verified = root / "verified.json"
+            verified.write_text(json.dumps({
+                "symbol": "SH.000300", "instrument": "price_index", "price_basis": "price_index",
+                "provenance_verified": True, "source": "local", "source_url": "https://example.test/csi300",
+                "fetched_at": today + "T15:00:00+08:00", "as_of": today, "bars": bars,
+            }), encoding="utf-8")
+            self.assertEqual(main(["research", "sample-manifest", "--study-dir", str(study), "--session-date", today, "--pool", str(pool), "--universe", str(universe), "--study-definition", "research-study-v2", "--index-history", str(verified), "--random-count", "0"]), 2)
+            again = json.loads((study / today / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(again["study_extension"]["bucket"], "unavailable")
+            self.assertEqual(again["study_extension"]["reason"], "index_history_missing")
+            other = root / "unverified"
+            unverified = root / "unverified.json"
+            unverified.write_text(json.dumps({
+                "symbol": "SH.000300", "instrument": "price_index", "price_basis": "price_index",
+                "provenance_verified": False, "source": "local", "source_url": "https://example.test/csi300",
+                "fetched_at": today + "T15:00:00+08:00", "as_of": today, "bars": bars,
+            }), encoding="utf-8")
+            self.assertEqual(main(["research", "sample-manifest", "--study-dir", str(other), "--session-date", today, "--pool", str(pool), "--universe", str(universe), "--study-definition", "research-study-v2", "--index-history", str(unverified), "--random-count", "0"]), 0)
+            other_manifest = json.loads((other / today / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(other_manifest["study_extension"]["bucket"], "unavailable")
+            self.assertEqual(other_manifest["study_extension"]["reason"], "index_provenance_not_verified")
+            self.assertFalse(other_manifest["study_extension"]["source_valid"])
+            observation = public_index_observation({"symbol": "SH.000300", "price_basis": "qfq", "source": "public", "bars": bars, "as_of": today})
+            self.assertFalse(observation["provenance_verified"])
+            self.assertFalse(observation["payload"]["certified_price_index"])
+            enrolled = enroll_market_bucket(observation["payload"], today)
+            self.assertEqual(enrolled["bucket"], "unavailable")
+            self.assertFalse(enrolled["source_valid"])
+            with self.assertRaisesRegex(ValueError, "etf_proxy_refused"):
+                public_index_observation({"symbol": "SH.510300"})
+
     def _tmp(self):
         import tempfile
         from contextlib import contextmanager
