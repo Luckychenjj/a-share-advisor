@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 import math
+from typing import Any
 
 from xiao_a.models import DailyBar, SignalAction
 
@@ -69,6 +70,43 @@ class Trade:
     reason: str
 
 
+def execution_assumptions(fees: FeeSchedule, slippage_bps: float, lot_size: int) -> dict[str, Any]:
+    """Mechanical constraints of this backtester.
+
+    VectorBT and QuantStats are intentionally unused. They do not replace
+    T+1, board lots, locked limits, or suspension handling implemented here.
+    """
+    return {
+        "authority": "AShareBacktester",
+        "vectorbt_used": False,
+        "quantstats_used": False,
+        "fill": "signal_bar_T_fills_at_next_bar_open",
+        "t_plus_1": "bought_shares_are_not_sellable_on_the_fill_session",
+        "lot_size": lot_size,
+        "buy_lot_rounding": "floor_to_lot",
+        "sell_odd_lot": "full_sell_uses_available_quantity_only_when_lot_rounding_is_zero",
+        "limits": "reject_fill_when_open_equals_high_equals_low_at_the_limit",
+        "default_limit_rate": "st_5_percent_otherwise_10_percent_unless_limit_rate_supplied",
+        "suspension": "reject_fill_on_suspended_bar_and_drop_that_pending_signal",
+        "short_sale": "prohibited",
+        "slippage_bps": slippage_bps,
+        "slippage_application": "buy_pays_open_times_one_plus_bps_sell_receives_open_times_one_minus_bps",
+        "fees": {
+            "commission_rate": fees.commission_rate,
+            "minimum_commission": fees.minimum_commission,
+            "stamp_duty_sell": fees.stamp_duty_sell,
+            "transfer_fee_rate": fees.transfer_fee_rate,
+        },
+        "not_modeled": [
+            "dividends",
+            "historical_st_status_changes",
+            "historical_index_membership",
+            "auction_queue",
+            "partial_fills",
+        ],
+    }
+
+
 @dataclass
 class BacktestResult:
     initial_cash: float
@@ -80,6 +118,7 @@ class BacktestResult:
     equity_curve: list[tuple[date, float]] = field(default_factory=list)
     ending_cash: float = 0.0
     ending_quantity: int = 0
+    assumptions: dict[str, Any] = field(default_factory=dict)
 
 
 class AShareBacktester:
@@ -165,6 +204,10 @@ class AShareBacktester:
                             position.available_quantity = 0  # T+1
                             cash -= notional + fee
                             trades.append(Trade(bar.trading_date, TradeSide.BUY, quantity, price, fee, "signal"))
+                        else:
+                            rejected.append(
+                                f"{bar.trading_date}: insufficient cash for one lot after fees and slippage"
+                            )
                 elif pending in {SignalAction.REDUCE, SignalAction.SELL} and position.available_quantity > 0:
                     if self._locked_limit(bar, TradeSide.SELL):
                         rejected.append(f"{bar.trading_date}: locked limit-down")
@@ -183,6 +226,8 @@ class AShareBacktester:
                             if position.quantity == 0:
                                 position.average_cost = 0.0
                             trades.append(Trade(bar.trading_date, TradeSide.SELL, quantity, price, fee, "signal"))
+                        elif pending == SignalAction.REDUCE:
+                            rejected.append(f"{bar.trading_date}: reduce quantity rounded below one lot")
                 elif pending in {SignalAction.REDUCE, SignalAction.SELL}:
                     # A bearish view without a sellable long position maps to
                     # no-buy/cash; it never opens a short position.
@@ -208,4 +253,5 @@ class AShareBacktester:
             equity_curve=curve,
             ending_cash=cash,
             ending_quantity=position.quantity,
+            assumptions=execution_assumptions(self.fees, self.slippage_bps, self.lot_size),
         )
