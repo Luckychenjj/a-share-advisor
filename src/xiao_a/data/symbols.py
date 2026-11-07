@@ -57,6 +57,24 @@ def normalize_symbol(value: str) -> NormalizedSymbol:
     return NormalizedSymbol(raw, exchange)
 
 
+
+_ETF_PREFIXES = ("15", "16", "18", "50", "51", "52", "56", "58")
+
+
+def is_etf(value: str) -> bool:
+    """Return whether a symbol is an A-share ETF/LOF fund code.
+
+    Matching uses the same prefix table as portfolio fee handling. ETFs do not
+    have classic stock rights-issue adjustments, and several market data hosts
+    only publish an unadjusted daily series for them.
+    """
+    try:
+        symbol = normalize_symbol(value)
+    except ValueError:
+        return False
+    return symbol.code[:2] in _ETF_PREFIXES
+
+
 def is_market_index(value: str) -> bool:
     """Return whether a symbol is one of the supported market benchmarks."""
     try:

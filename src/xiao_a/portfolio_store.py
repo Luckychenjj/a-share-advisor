@@ -4,7 +4,7 @@ import json
 import math
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -50,6 +50,8 @@ class PortfolioStore:
                 "transactions": list(previous.get("transactions") or [])[-200:],
                 "equity_history": list(previous.get("equity_history") or [])[-500:],
             }
+            if previous.get("cash_adjustments"):
+                state["cash_adjustments"] = list(previous.get("cash_adjustments") or [])[-200:]
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_suffix(self.path.suffix + ".tmp")
             temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -96,24 +98,190 @@ class PortfolioStore:
                 return current
             return self.save(current.get("holdings", []), current.get("cash", 0.0))
 
+    # ---- account fee defaults -------------------------------------------------
+    # Legacy defaults (used when no account_fees.json exists) keep the exact
+    # behaviour of earlier versions: commission rate from the request (else 0),
+    # minimum commission 5, transfer fee 0.001%, sell-side stamp duty 0.05%.
+    LEGACY_FEE_DEFAULTS: dict[str, Any] = {
+        "commission_rate": 0.0,
+        "minimum_commission": 5.0,
+        "free_five": False,
+        "transfer_fee_rate": 0.00001,
+        "stamp_tax_rate": 0.0005,
+        "fund_no_stamp_or_transfer": False,
+    }
+
+    @property
+    def fee_config_path(self) -> Path:
+        return self.path.parent / "account_fees.json"
+
+    @property
+    def cash_audit_path(self) -> Path:
+        return self.path.parent / "cash_audit.jsonl"
+
+    def fee_config(self) -> dict[str, Any]:
+        config = dict(self.LEGACY_FEE_DEFAULTS)
+        try:
+            stored = json.loads(self.fee_config_path.read_text(encoding="utf-8-sig"))
+            if isinstance(stored, dict):
+                config.update({key: stored[key] for key in stored})
+        except (OSError, ValueError, TypeError):
+            config["source"] = "legacy_defaults"
+        else:
+            config.setdefault("source", str(self.fee_config_path.name))
+        if config.get("free_five"):
+            config["minimum_commission"] = 0.0
+        return config
+
+    def save_fee_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"commission_rate", "minimum_commission", "free_five", "transfer_fee_rate",
+                   "stamp_tax_rate", "fund_no_stamp_or_transfer", "note"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(f"不支持的费率字段：{sorted(unknown)}")
+        with self._lock:
+            current = self.fee_config()
+            current.pop("source", None)
+            for key in ("commission_rate", "minimum_commission", "transfer_fee_rate", "stamp_tax_rate"):
+                if key in payload:
+                    value = float(payload[key])
+                    if value < 0 or not math.isfinite(value) or (key.endswith("_rate") and value > 0.01):
+                        raise ValueError(f"{key} 数值不合理：{payload[key]}")
+                    current[key] = value
+            for key in ("free_five", "fund_no_stamp_or_transfer"):
+                if key in payload:
+                    current[key] = bool(payload[key])
+            if "note" in payload:
+                current["note"] = str(payload["note"])[:500]
+            if current.get("free_five"):
+                current["minimum_commission"] = 0.0
+            current["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.fee_config_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.fee_config_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.fee_config_path)
+            return self.fee_config()
+
+    @staticmethod
+    def is_fund(symbol: str) -> bool:
+        """Exchange-traded funds (ETF/LOF): no stamp duty, no transfer fee."""
+        code = PortfolioStore._bare_symbol(symbol)
+        return len(code) == 6 and code[:2] in {"15", "16", "18", "50", "51", "52", "56", "58"}
+
+    @staticmethod
+    def parse_trade_time(value: Any) -> datetime | None:
+        """Parse an ISO timestamp or 'YYYY-MM-DD HH:MM[:SS]'; naive = Asia/Shanghai."""
+        if value in {None, ""}:
+            return None
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            when = datetime.fromisoformat(text)
+        except ValueError:
+            when = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+                try:
+                    when = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+            if when is None:
+                raise ValueError(f"成交时间格式不正确：{value}（用 ISO 或 YYYY-MM-DD HH:MM:SS，北京时间）")
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        now = datetime.now(timezone.utc)
+        if when.astimezone(timezone.utc) > now + timedelta(minutes=5):
+            raise ValueError("成交时间不能晚于当前时间")
+        return when
+
+    def adjust_cash(
+        self,
+        *,
+        note: str,
+        cash: Any = None,
+        amount: Any = None,
+        source: str = "api",
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Set (``cash``) or shift (``amount``) ledger cash with an audit record."""
+        note = str(note or "").strip()
+        if not note:
+            raise ValueError("现金调整必须填写备注 note")
+        if (cash is None) == (amount is None):
+            raise ValueError("cash（目标现金）和 amount（调整额）必须二选一")
+        with self._lock:
+            previous = self.load()
+            if previous is None:
+                raise ValueError("台账不存在，无法调整现金")
+            before = max(0.0, float(previous.get("cash") or 0.0))
+            if cash is not None:
+                after = float(cash)
+                mode = "set"
+            else:
+                after = before + float(amount)
+                mode = "delta"
+            if not math.isfinite(after):
+                raise ValueError("现金数值不合理")
+            if after < -1e-9:
+                raise ValueError(f"调整后现金为负（{after:.2f}），已拒绝")
+            after = max(0.0, after)
+            entry = {
+                "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "mode": mode,
+                "before": round(before, 6),
+                "after": round(after, 6),
+                "delta": round(after - before, 6),
+                "note": note[:500],
+                "source": str(source or "api")[:100],
+                "version_before": previous.get("version"),
+            }
+            extra = {key: previous[key] for key in ("broker_sellable_snapshot", "equity_updated_at") if key in previous}
+            state = self.save(previous.get("holdings", []), after)
+            state.update(extra)
+            entry["version_after"] = state["version"]
+            state["cash_adjustments"] = (list(previous.get("cash_adjustments") or []) + [entry])[-200:]
+            self._write(state)
+            with self.cash_audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            return state, entry
+
     def apply_trade(
         self,
         symbol: str,
         side: str,
         quantity: int,
         price: float,
-        commission_rate: float,
+        commission_rate: float | None = None,
         *,
-        stamp_tax_rate: float = 0.0005,
-        transfer_fee_rate: float = 0.00001,
-        minimum_commission: float = 5.0,
+        stamp_tax_rate: float | None = None,
+        transfer_fee_rate: float | None = None,
+        minimum_commission: float | None = None,
+        fee: float | None = None,
+        traded_at: Any = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Apply one A-share trade and return the new state plus fee details."""
+        """Apply one A-share trade and return the new state plus fee details.
+
+        Fee parameters left as None come from the account fee config
+        (account_fees.json, else the legacy defaults). ``fee`` is the broker's
+        actual total fee and overrides the calculation. ``traded_at`` is the fill
+        time (naive = Asia/Shanghai); entry time is used when omitted.
+        """
         symbol = str(symbol).strip().upper()
         side = str(side).strip().lower()
         quantity = int(quantity)
         price = float(price)
-        commission_rate = float(commission_rate)
+        config = self.fee_config()
+        fund = bool(config.get("fund_no_stamp_or_transfer")) and self.is_fund(symbol)
+        commission_rate = float(config["commission_rate"] if commission_rate is None else commission_rate)
+        minimum_commission = float(config["minimum_commission"] if minimum_commission is None else minimum_commission)
+        if stamp_tax_rate is None:
+            stamp_tax_rate = 0.0 if fund else float(config["stamp_tax_rate"])
+        if transfer_fee_rate is None:
+            transfer_fee_rate = 0.0 if fund else float(config["transfer_fee_rate"])
+        stamp_tax_rate = float(stamp_tax_rate)
+        transfer_fee_rate = float(transfer_fee_rate)
+        explicit_fee = None if fee in {None, ""} else float(fee)
+        if explicit_fee is not None and (explicit_fee < 0 or not math.isfinite(explicit_fee)):
+            raise ValueError("实际费用 fee 不能为负数")
+        fill_time = self.parse_trade_time(traded_at)
         if not symbol or side not in {"buy", "sell"}:
             raise ValueError("交易方向或股票代码不正确")
         if quantity <= 0:
@@ -140,6 +308,15 @@ class PortfolioStore:
             stamp_tax = amount * stamp_tax_rate if side == "sell" else 0.0
             transfer_fee = amount * transfer_fee_rate
             total_fee = commission + stamp_tax + transfer_fee
+            fee_source = "calculated"
+            if explicit_fee is not None:
+                fee_source = "explicit"
+                total_fee = explicit_fee
+                commission = explicit_fee - stamp_tax - transfer_fee
+                if commission < -1e-9:
+                    # Breakdown unknown; keep only the broker's total.
+                    commission, stamp_tax, transfer_fee = explicit_fee, 0.0, 0.0
+                commission = max(0.0, commission)
             realized_profit = None
             if side == "buy":
                 total_cash = amount + total_fee
@@ -182,8 +359,9 @@ class PortfolioStore:
             elif index is not None:
                 holdings.pop(index)
 
+            entry_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
             transaction = {
-                "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "time": fill_time.astimezone(timezone.utc).isoformat(timespec="seconds") if fill_time else entry_time,
                 "symbol": symbol,
                 "side": side,
                 "quantity": quantity,
@@ -195,6 +373,9 @@ class PortfolioStore:
                 "total_fee": total_fee,
                 "cash_delta": -amount - total_fee if side == "buy" else amount - total_fee,
                 "realized_profit": realized_profit,
+                "fee_source": fee_source,
+                "time_source": "traded_at" if fill_time else "entry",
+                "recorded_at": entry_time,
             }
             transactions = list(previous.get("transactions") or [])
             transactions.append(transaction)

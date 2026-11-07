@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import uuid
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -394,6 +395,11 @@ def _company_brief(symbol: str, *, fallback_name: str | None = None, fallback_in
             "公司2025年年度报告（行业地位章节；公司披露）",
             "https://disc.static.szse.cn/disc/disk03/finalpage/2026-03-31/7bb16111-3899-41e7-8a07-abf2c8798dd7.PDF",
         ),
+        "300502": (
+            "公司在2025年年报中称其为全球高速光互联解决方案的创新者和领导者，并称是全球少数具备800G以上光模块规模化量产交付能力的公司之一。",
+            "公司2025年年度报告（市场地位章节；公司披露）",
+            "https://disc.static.szse.cn/disc/disk03/finalpage/2026-04-24/e20c68b8-9ce5-4751-acfd-9fb5f4e44645.PDF",
+        ),
     }
     if not position_sentence and normalized.code in annual_report_positions:
         position_sentence, position_basis, position_source_url = annual_report_positions[normalized.code]
@@ -657,6 +663,35 @@ def _holding_daily_profit(symbol: str, quantity: int, quote: Quote, state: dict)
     }
 
 
+_LAST_PREVIOUS_CLOSE: dict[str, tuple[str, float]] = {}
+_LAST_PREVIOUS_CLOSE_LOCK = threading.RLock()
+
+
+def _remember_previous_close(symbol: str, quote: Quote) -> None:
+    if quote.previous_close and quote.previous_close > 0 and isfinite(quote.previous_close):
+        with _LAST_PREVIOUS_CLOSE_LOCK:
+            _LAST_PREVIOUS_CLOSE[normalize_symbol(symbol).code] = (datetime.now(SHANGHAI).date().isoformat(), float(quote.previous_close))
+
+
+def _fallback_previous_close(symbol: str, quote: Quote | None) -> float | None:
+    """昨收 for a holding without a usable current price (no trade yet / fetch failed)."""
+    if quote is not None and quote.previous_close and quote.previous_close > 0 and isfinite(quote.previous_close):
+        return float(quote.previous_close)
+    today = datetime.now(SHANGHAI).date()
+    with _LAST_PREVIOUS_CLOSE_LOCK:
+        remembered = _LAST_PREVIOUS_CLOSE.get(normalize_symbol(symbol).code)
+    if remembered and remembered[0] == today.isoformat():
+        return remembered[1]
+    try:
+        bars = _VOLUME_BASELINE_PROVIDER.fetch_daily(normalize_symbol(symbol).canonical, limit=5).bars
+        prior = [bar for bar in bars if bar.trading_date < today and bar.close > 0]
+        if prior:
+            return float(prior[-1].close)
+    except Exception:
+        return None
+    return None
+
+
 def _live_portfolio(state: dict) -> dict:
     holdings = state.get("holdings", [])
 
@@ -692,10 +727,22 @@ def _live_portfolio(state: dict) -> dict:
                 if quote and quote.provenance and quote.provenance.as_of else None
             ),
         }
+        valuation_source = "用户参考估值" if quote and quote.provenance and quote.provenance.source == "user_reference_valuation" else "实时行情"
+        estimated = False
         if quote is None or quote.price <= 0:
-            base["status"] = "unavailable"
-            base["error"] = "; ".join(filter(None, [base["error"], "无有效正数报价，不能按零元估值"]))
-            return base
+            previous_close = _fallback_previous_close(symbol, quote)
+            if previous_close is None:
+                base["status"] = "unavailable"
+                base["valuation_source"] = "unavailable"
+                base["error"] = "; ".join(filter(None, [base["error"], "无有效报价且取不到昨收，暂按0估值"]))
+                return base
+            name = quote.name if quote else ""
+            quote = Quote(normalize_symbol(symbol).canonical, name, previous_close, previous_close,
+                          status=DataStatus.PARTIAL, provenance=quote.provenance if quote else None)
+            estimated = True
+            valuation_source = "昨收估值"
+        else:
+            _remember_previous_close(symbol, quote)
         market_value = quote.price * quantity
         volume_ratio = _volume_ratio(quote)
         base.update({
@@ -712,7 +759,15 @@ def _live_portfolio(state: dict) -> dict:
             "profit": ((quote.price - average_cost) * quantity
                        if average_cost is not None else None),
             "status": result.status.value,
+            "valuation_source": valuation_source,
         })
+        if estimated:
+            base.update({
+                "status": "estimated",
+                "daily_profit": None,
+                "daily_profit_pct": None,
+                "error": "; ".join(filter(None, [base["error"], "无有效现价，按昨收估值"])),
+            })
         return base
 
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(holdings)))) as executor:
@@ -783,6 +838,7 @@ def _live_portfolio(state: dict) -> dict:
         ),
         "day_open_date": day_open.get("date") if day_open else None,
         "largest_position_pct": max((row["weight"] for row in rows), default=0.0),
+        "estimated_symbols": [row["symbol"] for row in rows if row.get("valuation_source") == "昨收估值"],
         "holdings": rows,
         "equity_history": equity_history,
         "performance": summarize_equity_history(equity_history),
@@ -895,6 +951,7 @@ def _settle_forward_predictions() -> dict:
     stock_results = {}
     settled: list[str] = []
     pending_reasons: list[dict] = []
+    skipped_not_due = 0
     # Prefetch each distinct symbol's history concurrently. Fetching ~200+
     # symbols one after another took minutes and outlived client timeouts;
     # ledger writes below stay strictly sequential.
@@ -909,7 +966,17 @@ def _settle_forward_predictions() -> dict:
             return (today - raw_cutoff.astimezone(SHANGHAI).date()).days >= 6
         except Exception:
             return True  # let the main loop report the bad record
-    symbols = sorted({str(item.get("symbol")) for item in pending if item.get("symbol") and _maybe_due(item)})
+    due_pending = [item for item in pending if _maybe_due(item)]
+    not_due = [item for item in pending if not _maybe_due(item)]
+    for item in not_due:
+        skipped_not_due += 1
+        pending_reasons.append({
+            "prediction_id": item.get("prediction_id"),
+            "symbol": item.get("symbol"),
+            "reason": "RuntimeError: 预测期限尚未完整，尚无5个已结束的后续交易日",
+            "recorded": False,
+        })
+    symbols = sorted({str(item.get("symbol")) for item in due_pending if item.get("symbol")})
     if symbols:
         def _fetch(symbol: str):
             try:
@@ -924,7 +991,8 @@ def _settle_forward_predictions() -> dict:
                     stock_results[symbol] = result
                     if symbol == "SH.000300":
                         benchmark_result = result
-    for record in pending:
+    wrote = 0
+    for record in due_pending:
         prediction_id = record["prediction_id"]
         # Settlement is an explicit user action. A failed fetch must not block
         # another attempt after connectivity/data is repaired on the same day.
@@ -978,15 +1046,105 @@ def _settle_forward_predictions() -> dict:
                 "benchmark_price_basis": "沪深300原始指数点位，无股票除权复权",
                 "settlement_version": "forward-settlement-v2-index-day",
                 "execution_simulation": "not_applied",
-            })
+            }, record=record, fsync=False)
             settled.append(event["prediction_id"])
+            wrote += 1
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
-            _PREDICTION_LEDGER.append("settlement_attempted", {
-                "prediction_id": prediction_id, "attempt_at": datetime.now(SHANGHAI).isoformat(), "reason": reason,
-            })
-            pending_reasons.append({"prediction_id": prediction_id, "symbol": record.get("symbol"), "reason": reason})
-    return {"settled_count": len(settled), "settled_ids": settled, "pending_count": len(pending) - len(settled), "pending_reasons": pending_reasons}
+            # Do not bloat the ledger with routine "not yet due" notes; callers
+            # still see them in pending_reasons. Real data failures stay audited.
+            if "预测期限尚未完整" in reason:
+                pending_reasons.append({
+                    "prediction_id": prediction_id, "symbol": record.get("symbol"),
+                    "reason": reason, "recorded": False,
+                })
+            else:
+                _PREDICTION_LEDGER.append("settlement_attempted", {
+                    "prediction_id": prediction_id, "attempt_at": datetime.now(SHANGHAI).isoformat(), "reason": reason,
+                }, fsync=False)
+                wrote += 1
+                pending_reasons.append({
+                    "prediction_id": prediction_id, "symbol": record.get("symbol"),
+                    "reason": reason, "recorded": True,
+                })
+    if wrote:
+        _PREDICTION_LEDGER.flush_ledger()
+    return {
+        "settled_count": len(settled),
+        "settled_ids": settled,
+        "pending_count": len(pending) - len(settled),
+        "pending_reasons": pending_reasons,
+        "skipped_not_due": skipped_not_due,
+    }
+
+
+_SETTLE_JOB_LOCK = threading.Lock()
+_SETTLE_JOB: dict = {
+    "status": "idle",
+    "job_id": None,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,
+    "error": None,
+}
+
+
+def _settle_job_snapshot() -> dict:
+    with _SETTLE_JOB_LOCK:
+        return {
+            "status": _SETTLE_JOB.get("status"),
+            "job_id": _SETTLE_JOB.get("job_id"),
+            "started_at": _SETTLE_JOB.get("started_at"),
+            "finished_at": _SETTLE_JOB.get("finished_at"),
+            "error": _SETTLE_JOB.get("error"),
+            "result": _SETTLE_JOB.get("result"),
+        }
+
+
+def _run_settle_job(job_id: str) -> None:
+    started = datetime.now(SHANGHAI).isoformat()
+    try:
+        settlement = _settle_forward_predictions()
+        review = _PREDICTION_LEDGER.check_review_reminders()
+        # Full report is expensive on large ledgers; keep it in the background
+        # job payload so the accepting HTTP request can return immediately.
+        report = _PREDICTION_LEDGER.report()
+        payload = {"settlement": settlement, "report": report, "review_monitor": review}
+        with _SETTLE_JOB_LOCK:
+            if _SETTLE_JOB.get("job_id") == job_id:
+                _SETTLE_JOB.update({
+                    "status": "done",
+                    "finished_at": datetime.now(SHANGHAI).isoformat(),
+                    "result": payload,
+                    "error": None,
+                })
+    except Exception as exc:
+        with _SETTLE_JOB_LOCK:
+            if _SETTLE_JOB.get("job_id") == job_id:
+                _SETTLE_JOB.update({
+                    "status": "error",
+                    "finished_at": datetime.now(SHANGHAI).isoformat(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "result": None,
+                })
+
+
+def _start_settle_job() -> dict:
+    with _SETTLE_JOB_LOCK:
+        if _SETTLE_JOB.get("status") == "running":
+            return _settle_job_snapshot()
+        job_id = str(uuid.uuid4())
+        _SETTLE_JOB.update({
+            "status": "running",
+            "job_id": job_id,
+            "started_at": datetime.now(SHANGHAI).isoformat(),
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        })
+    thread = threading.Thread(target=_run_settle_job, args=(job_id,), name=f"settle-{job_id[:8]}", daemon=True)
+    thread.start()
+    return _settle_job_snapshot()
 
 
 def _annotate_offline_fallback(cached: dict, live_payload, live_status: int) -> dict:
@@ -1125,6 +1283,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/portfolio-state":
             self._send_json({"state": _PORTFOLIO_STORE.load()})
             return
+        if parsed.path == "/api/account-fees":
+            self._send_json({"fees": _PORTFOLIO_STORE.fee_config()})
+            return
+        if parsed.path == "/api/cash-adjust":
+            state = _PORTFOLIO_STORE.load() or {}
+            self._send_json({"adjustments": list(reversed(state.get("cash_adjustments") or []))})
+            return
         if parsed.path == "/api/portfolio-live":
             state = _PORTFOLIO_STORE.ensure_day_open()
             self._send_json({"data": _live_portfolio(state) if state else None})
@@ -1258,7 +1423,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self._cache_request = None
-        if self.path not in {"/api/evaluate", "/api/auto-evaluate", "/api/portfolio", "/api/trade", "/api/screener", "/api/backtest", "/api/prediction-audit"}:
+        if self.path not in {"/api/evaluate", "/api/auto-evaluate", "/api/portfolio", "/api/trade", "/api/screener", "/api/backtest", "/api/prediction-audit", "/api/cash-adjust", "/api/account-fees"}:
             self._send_json({"error": "not found"}, 404)
             return
         try:
@@ -1307,9 +1472,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/prediction-audit":
                 operation = payload.get("operation")
                 if operation == "settle_pending":
-                    result = _settle_forward_predictions()
-                    _PREDICTION_LEDGER.check_review_reminders()
-                    self._send_json({"settlement": result, "report": _PREDICTION_LEDGER.report()})
+                    # Default async: large ledgers take minutes and used to outlive
+                    # client timeouts even after the server finished. Pass
+                    # wait=true / async=false for the old synchronous response.
+                    wait = bool(payload.get("wait")) or str(payload.get("async", "true")).lower() in {"0", "false", "no"}
+                    if wait:
+                        result = _settle_forward_predictions()
+                        review = _PREDICTION_LEDGER.check_review_reminders()
+                        self._send_json({"settlement": result, "report": _PREDICTION_LEDGER.report(), "review_monitor": review, "mode": "sync"})
+                    else:
+                        job = _start_settle_job()
+                        self._send_json({
+                            "status": job.get("status"),
+                            "job_id": job.get("job_id"),
+                            "started_at": job.get("started_at"),
+                            "mode": "async",
+                            "message": "结算已在后台启动；请用 operation=settle_status 查询进度",
+                            "poll": {"operation": "settle_status", "job_id": job.get("job_id")},
+                        })
+                elif operation == "settle_status":
+                    job = _settle_job_snapshot()
+                    requested = str(payload.get("job_id") or "").strip()
+                    if requested and job.get("job_id") and requested != job.get("job_id"):
+                        self._send_json({
+                            "status": "unknown_job",
+                            "job_id": requested,
+                            "current_job_id": job.get("job_id"),
+                            "current_status": job.get("status"),
+                        })
+                    else:
+                        body = {
+                            "status": job.get("status"),
+                            "job_id": job.get("job_id"),
+                            "started_at": job.get("started_at"),
+                            "finished_at": job.get("finished_at"),
+                            "error": job.get("error"),
+                            "mode": "async",
+                        }
+                        if job.get("status") == "done" and isinstance(job.get("result"), dict):
+                            body.update(job["result"])
+                        self._send_json(body)
                 elif operation == "check_review":
                     self._send_json({"review_monitor": _PREDICTION_LEDGER.check_review_reminders()})
                 elif operation == "ack_review":
@@ -1444,17 +1646,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                      for day, equity in result.equity_curve],
                 })
             elif self.path == "/api/trade":
+                # Omitted fee fields fall back to the account fee config
+                # (account_fees.json; legacy defaults when it does not exist).
                 state, transaction = _PORTFOLIO_STORE.apply_trade(
                     payload.get("symbol", ""),
                     payload.get("side", ""),
                     payload.get("quantity", 0),
                     payload.get("price", 0),
-                    payload.get("commission_rate", 0),
-                    stamp_tax_rate=payload.get("stamp_tax_rate", 0.0005),
-                    transfer_fee_rate=payload.get("transfer_fee_rate", 0.00001),
-                    minimum_commission=payload.get("minimum_commission", 5.0),
+                    payload.get("commission_rate"),
+                    stamp_tax_rate=payload.get("stamp_tax_rate"),
+                    transfer_fee_rate=payload.get("transfer_fee_rate"),
+                    minimum_commission=payload.get("minimum_commission"),
+                    fee=payload.get("fee"),
+                    traded_at=payload.get("traded_at") or payload.get("time") or payload.get("trade_time"),
                 )
                 self._send_json({"state": state, "transaction": transaction})
+            elif self.path == "/api/cash-adjust":
+                state, entry = _PORTFOLIO_STORE.adjust_cash(
+                    note=payload.get("note", ""),
+                    cash=payload.get("cash"),
+                    amount=payload.get("amount"),
+                    source=payload.get("source") or "api",
+                )
+                self._send_json({"state": state, "adjustment": entry})
+            elif self.path == "/api/account-fees":
+                self._send_json({"fees": _PORTFOLIO_STORE.save_fee_config(payload)})
             else:
                 holdings = []
                 for item in payload.get("holdings", []):

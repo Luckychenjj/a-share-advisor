@@ -137,26 +137,39 @@ class PredictionLedger:
             self._head_cache = (signature, head, count)
         return head, count
 
-    def append(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def append(self, event_type: str, payload: dict[str, Any], *, fsync: bool = True) -> dict[str, Any]:
         with self._lock:
-            previous, existing_count = self._verified_head()
-            event = {
-                "event_id": str(uuid.uuid4()),
-                "event_type": event_type,
-                "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                "sequence": existing_count + 1,
-                "previous_hash": previous,
-                **payload,
-            }
-            event["event_hash"] = hashlib.sha256(previous.encode("ascii") + _canonical(event)).hexdigest()
+            return self._append_unlocked(event_type, payload, fsync=fsync)
+
+    def _append_unlocked(self, event_type: str, payload: dict[str, Any], *, fsync: bool = True) -> dict[str, Any]:
+        previous, existing_count = self._verified_head()
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            "sequence": existing_count + 1,
+            "previous_hash": previous,
+            **payload,
+        }
+        event["event_hash"] = hashlib.sha256(previous.encode("ascii") + _canonical(event)).hexdigest()
+        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) + "\n")
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+        signature = self._file_signature()
+        if signature is not None:
+            self._head_cache = (signature, event["event_hash"], existing_count + 1)
+        return event
+
+    def flush_ledger(self) -> None:
+        """Force outstanding appends onto durable storage after a batch."""
+        with self._lock:
+            if not self.path.exists():
+                return
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            signature = self._file_signature()
-            if signature is not None:
-                self._head_cache = (signature, event["event_hash"], existing_count + 1)
-            return event
 
     def records(self) -> list[dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
@@ -211,8 +224,9 @@ class PredictionLedger:
         self.append("prediction_created", stored)
         return stored, True
 
-    def settle(self, prediction_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        record = next((item for item in self.records() if item["prediction_id"] == prediction_id), None)
+    def settle(self, prediction_id: str, result: dict[str, Any], *, record: dict[str, Any] | None = None, fsync: bool = True) -> dict[str, Any]:
+        if record is None:
+            record = next((item for item in self.records() if item["prediction_id"] == prediction_id), None)
         if record is None:
             raise KeyError("预测记录不存在")
         if record.get("settlement"):
@@ -230,7 +244,7 @@ class PredictionLedger:
                 raise ValueError("未到期标签不得结算；退出和结算日期须严格晚于信息截止日")
             if not math.isfinite(target_return) or bool(result.get("event_occurred")) != (target_return > 0):
                 raise ValueError("事件标签必须严格按收益是否大于零计算")
-        event = self.append("prediction_settled", {"prediction_id": prediction_id, **result})
+        event = self.append("prediction_settled", {"prediction_id": prediction_id, **result}, fsync=fsync)
         return event
 
     def correct(self, prediction_id: str, replacement: dict[str, Any], reason: str) -> dict[str, Any]:

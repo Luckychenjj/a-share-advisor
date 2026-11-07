@@ -7,7 +7,7 @@ from urllib.parse import quote as urlquote
 from urllib.request import Request
 from typing import Protocol
 
-from xiao_a.data.symbols import NormalizedSymbol, normalize_symbol, is_market_index
+from xiao_a.data.symbols import NormalizedSymbol, normalize_symbol, is_etf, is_market_index
 from xiao_a.data.http import open_market_url
 from xiao_a.models import DailyBar, DataStatus, Provenance
 
@@ -59,11 +59,14 @@ def parse_tencent_kline_payload(payload: str, requested_symbol: str, *, adjustme
         raise ValueError(f"Tencent kline error: {raw.get('msg') or raw.get('code')}")
     node = (raw.get("data") or {}).get(normalized.tencent) or {}
     rows = (node.get("qfqday") if adjustment == "qfq" else node.get("day")) or []
-    # Indices have no share ex-rights adjustment. Tencent returns their level
-    # history under day even for a qfq request. Never apply this to stocks:
-    # silently mixing unadjusted stock prices would corrupt return labels.
-    if not rows and adjustment == "qfq" and is_market_index(requested_symbol):
+    # Indices and ETFs have no classic stock rights-issue adjustment. Tencent
+    # often returns their history under day even for a qfq request. Never apply
+    # this silent fallback to ordinary stocks: mixing unadjusted stock prices
+    # into a qfq series would corrupt return labels.
+    qfq_day_fallback = False
+    if not rows and adjustment == "qfq" and (is_market_index(requested_symbol) or is_etf(requested_symbol)):
         rows = node.get("day") or []
+        qfq_day_fallback = bool(rows)
     if not rows:
         return KlineResult([], DataStatus.UNAVAILABLE, warnings=["Tencent returned no daily bars"])
 
@@ -104,6 +107,11 @@ def parse_tencent_kline_payload(payload: str, requested_symbol: str, *, adjustme
     fetched_at = datetime.now(timezone.utc)
     source_url = f"{_BASE_URL}?param={normalized.tencent},day,,,{len(rows)},{adjustment}"
     status = DataStatus.FRESH if parsed else DataStatus.INVALID
+    warnings: list[str] = []
+    if qfq_day_fallback:
+        warnings.append("tencent qfqday missing; using day series for index/ETF")
+    if parsed and len(parsed) < 120:
+        warnings.append(f"only {len(parsed)} valid daily bars")
     return KlineResult(
         parsed,
         status,
@@ -113,7 +121,7 @@ def parse_tencent_kline_payload(payload: str, requested_symbol: str, *, adjustme
             fetched_at,
             datetime.combine(parsed[-1].trading_date, datetime.min.time(), tzinfo=timezone.utc) if parsed else None,
         ),
-        warnings=[] if len(parsed) >= 120 else [f"only {len(parsed)} valid daily bars"],
+        warnings=warnings,
     )
 
 
@@ -267,8 +275,9 @@ def parse_sina_kline_payload(payload: str, requested_symbol: str) -> KlineResult
 
 
 class SinaKlineProvider:
-    """HTTPS daily-bar fallback. Sina only serves unadjusted prices, so stocks
-    are served for adjustment="none" only; indices (no ex-rights) for both."""
+    """HTTPS daily-bar fallback. Sina only serves unadjusted prices, so ordinary
+    stocks are served for adjustment="none" only; indices and ETFs (no classic
+    rights-issue series) may use the same bars for a qfq request."""
 
     name = "sina-kline"
 
@@ -280,14 +289,20 @@ class SinaKlineProvider:
         normalized = normalize_symbol(symbol)
         if adjustment not in {"qfq", "none"}:
             raise ValueError("unsupported adjustment")
-        if adjustment == "qfq" and not is_market_index(symbol):
+        if adjustment == "qfq" and not (is_market_index(symbol) or is_etf(symbol)):
             raise ValueError("Sina kline has no qfq prices for stocks")
         limit = max(30, min(1000, int(limit)))
         url = f"{_SINA_KLINE_URL}?symbol={normalized.tencent}&scale=240&ma=no&datalen={limit}"
         request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
         with open_market_url(request, timeout=self.timeout) as response:
             payload = response.read().decode("utf-8", errors="replace")
-        return parse_sina_kline_payload(payload, symbol)
+        result = parse_sina_kline_payload(payload, symbol)
+        if adjustment == "qfq" and is_etf(symbol) and result.bars:
+            result.warnings = [
+                "sina ETF bars are unadjusted (no separate qfq series)",
+                *result.warnings,
+            ]
+        return result
 
 
 class KlineRouter:
@@ -318,4 +333,28 @@ class KlineRouter:
             degraded.errors = errors
             degraded.warnings.append("all fresh kline providers failed; using degraded history")
             return degraded
+        # Last resort when every qfq upstream failed (common when Eastmoney is
+        # down and Tencent omits qfqday for some symbols): try unadjusted bars
+        # once, and label them so callers can see the price basis.
+        if adjustment == "qfq":
+            none_errors: list[str] = []
+            for provider in self.providers:
+                try:
+                    result = provider.fetch_daily(symbol, limit=limit, adjustment="none")
+                except Exception as exc:
+                    none_errors.append(f"{provider.name}(none): {type(exc).__name__}: {exc}")
+                    continue
+                if result.bars:
+                    result.errors = [*errors, *none_errors, *result.errors]
+                    result.warnings = [
+                        "qfq providers failed; using unadjusted daily bars",
+                        *result.warnings,
+                    ]
+                    if result.status == DataStatus.FRESH:
+                        return result
+                    degraded = result
+            if degraded is not None:
+                degraded.errors = [*errors, *none_errors, *degraded.errors]
+                return degraded
+            errors = [*errors, *none_errors]
         return KlineResult([], DataStatus.UNAVAILABLE, warnings=["no provider returned usable daily bars"], errors=errors)
